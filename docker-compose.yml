@@ -9,6 +9,11 @@ services:
       - ./recorder/record.sh:/record.sh:ro
       - ./data/archive:/archive
     entrypoint: ["/bin/sh", "/record.sh"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   timeshift:
     image: alpine:3.20
@@ -24,6 +29,11 @@ services:
       - ./timeshift/generate.sh:/generate.sh:ro
       - ./data/archive:/archive:ro
       - ./data/live:/live
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
 
   web:
     image: nginx:1.27-alpine
@@ -35,3 +45,8 @@ services:
       - ./data/live:/live:ro
       - ./data/archive:/archive:ro
       - ./web:/usr/share/nginx/html:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
