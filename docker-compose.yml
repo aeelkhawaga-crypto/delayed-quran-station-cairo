@@ -1,0 +1,37 @@
+services:
+  recorder:
+    build: ./recorder
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: UTC
+    volumes:
+      - ./recorder/record.sh:/record.sh:ro
+      - ./data/archive:/archive
+    entrypoint: ["/bin/sh", "/record.sh"]
+
+  timeshift:
+    image: alpine:3.20
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: UTC
+    command: >
+      sh -c "apk add --no-cache coreutils >/dev/null &&
+             apk add --no-cache tzdata >/dev/null &&
+             exec sh /generate.sh"
+    volumes:
+      - ./timeshift/generate.sh:/generate.sh:ro
+      - ./data/archive:/archive:ro
+      - ./data/live:/live
+
+  web:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./data/live:/live:ro
+      - ./data/archive:/archive:ro
+      - ./web:/usr/share/nginx/html:ro
