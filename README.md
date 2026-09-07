@@ -1,5 +1,7 @@
 # Quran Radio — Delayed Rebroadcast Server
 
+[النسخة العربية](README.ar.md)
+
 Records the Cairo Quran Radio stream 24/7 and rebroadcasts it as a live HLS
 stream delayed by exactly 2 hours, so listeners in Ireland hear the broadcast
 aligned to Irish local time (what aired at 7:00 AM Cairo time plays at 7:00 AM
