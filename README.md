@@ -14,8 +14,8 @@ Three containers (docker-compose):
 | Service   | Role |
 |-----------|------|
 | `recorder` | ffmpeg ingests the stream and writes 10 s audio segments with UTC timestamp filenames into a rolling archive (default: keep 4 h). Auto-reconnects on network drops. |
-| `timeshift` | Rebuilds `/live/delayed.m3u8` every few seconds from segments recorded exactly `DELAY_SECONDS` ago. Players see an ordinary live HLS stream. |
-| `web` | nginx serves the delayed playlist, the archived segments, and a player page at `/` (hls.js, big play button, Irish clock). |
+| `scheduler` | Rebuilds `/live/delayed.m3u8` every few seconds from segments recorded exactly `DELAY_SECONDS` ago, and handles Adhan events (see below). Players see an ordinary live HLS stream. |
+| `web` | nginx serves the delayed playlist, the archived segments, the Adhan/filler chunks, and a player page at `/` (hls.js, big play button, Irish clock). |
 
 ## Setup
 
@@ -48,6 +48,40 @@ default delay is exactly 2 hours. However, Egypt and Ireland change clocks on
 different dates, so for a few days in late March–April the difference is 1 hour,
 and for a few days in late October it is 3 hours. During those weeks, update
 `DELAY_SECONDS` in `.env` and run `docker compose up -d` to apply.
+
+## Adhan & fillers
+
+The Cairo station broadcasts the Adhan 5 times a day at **Cairo** prayer
+times. Because of the 2 h delay, each Adhan would air at the same clock time
+in Ireland. The scheduler changes that:
+
+- **Hidden Cairo Adhans** (timings from the [AlAdhan API](https://aladhan.com/prayer-times-api),
+  `method=5`): when the delayed stream would air one, it plays the audio
+  files from `fillers/` on rotation for the whole ~7-minute window instead,
+  then resumes. If `fillers/` is empty, the Adhan is skipped entirely.
+- **Irish Adhans**: at each time listed in `schedule/irish-times.txt`
+  (daily `HH:MM`, weekly `Fri 18:30`, or exact `2026-09-15 18:23`, all in
+  Europe/Dublin time), it plays one file from `adhans/` (round-robin), then
+  resumes the delayed stream. The gap in the delayed content afterwards is
+  expected.
+
+To activate: drop mp3s into `adhans/` and `fillers/` (no restart needed —
+the scheduler picks them up within seconds), and edit `schedule/irish-times.txt`.
+
+### Harvesting the Cairo Adhan cuts
+
+The station repeats the same Adhan recordings daily, so one capture per
+prayer is enough. `harvest/harvest-adhan.sh` (run every 5 min via cron) cuts
+`[prayer−3min, prayer+7min]` out of the rolling archive into
+`adhans-raw/YYYY-MM-DD_<Prayer>.mp3` shortly after each Cairo prayer time.
+Clean/trim those, then copy the final versions into `adhans/` (and use
+`fillers/` for anything you want aired during the hidden Cairo windows).
+
+Cron entry:
+
+```
+*/5 * * * * root /opt/quran-radio/harvest/harvest-adhan.sh >> /var/log/adhan-harvest.log 2>&1
+```
 
 ## Operations
 

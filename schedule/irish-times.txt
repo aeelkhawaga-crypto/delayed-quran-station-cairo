@@ -1,0 +1,16 @@
+# Irish Adhan times — the scheduler plays one file from adhans/ (round-robin)
+# at each of these times, then resumes the delayed stream.
+#
+# Formats (one event per line, # starts a comment):
+#   HH:MM              daily, interpreted in Europe/Dublin local time
+#   Mon 05:30          weekly, on the given day (Mon Tue Wed Thu Fri Sat Sun)
+#   2026-09-15 18:23   one-off, exact date
+#
+# Times shift with Irish daylight saving automatically.
+# Examples below are commented out — uncomment and edit to activate.
+
+# 05:30
+# 13:05
+# 16:45
+# 19:20
+# 20:45
