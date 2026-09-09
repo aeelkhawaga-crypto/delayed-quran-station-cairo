@@ -111,7 +111,7 @@ def irish_events(now):
         lines = open(IRISH_FILE).read().splitlines()
     except Exception:
         return events
-    day = datetime.date.fromtimestamp(now, UTC)
+    day = datetime.datetime.fromtimestamp(now, UTC).date()
     for line in lines:
         line = line.split("#", 1)[0].strip()
         if not line:
@@ -168,7 +168,7 @@ def cairo_prayers(day):
 
 def cairo_windows(now):
     """Suppression windows in served wall-time (UTC epochs)."""
-    day = datetime.date.fromtimestamp(now, UTC)
+    day = datetime.datetime.fromtimestamp(now, UTC).date()
     wins = []
     for d in (day, day + datetime.timedelta(days=1)):
         pr = cairo_prayers(d)
