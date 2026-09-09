@@ -9,8 +9,12 @@ Two event types override it:
   from /adhans (round-robin), then resume the delayed stream.
 - Cairo Adhan suppression: when the delayed stream would air the Adhan that
   the Cairo station broadcasts at prayer times (AlAdhan API, method=5),
-  serve filler files from /fillers for the whole window instead; if there
-  are no fillers, skip the Adhan content and jump ahead.
+  serve filler files from /fillers instead (whole files, one at a time,
+  round-robin per window); if there are no fillers, skip the Adhan content
+  and jump ahead.
+
+If an Irish Adhan and a Cairo window overlap or are within MIN_GAP seconds
+of each other, both are skipped and the normal delayed stream plays.
 
 Sequence numbers are derived from wall-clock time in "content space"
 (wall time minus DELAY) so they are stable per URI and monotonic.
@@ -23,6 +27,7 @@ METHOD = os.environ.get("PRAYER_METHOD", "5")
 LOOP = float(os.environ.get("LOOP_SECONDS", "2.5"))
 WIN_PRE = int(os.environ.get("WINDOW_PRE_SECONDS", "90"))
 WIN_POST = int(os.environ.get("WINDOW_POST_SECONDS", "360"))
+MIN_GAP = int(os.environ.get("MIN_GAP_SECONDS", "240"))
 
 ARCHIVE = os.environ.get("ARCHIVE_DIR", "/archive")
 LIVE = os.environ.get("LIVE_DIR", "/live")
@@ -94,7 +99,7 @@ state = load_state()
 
 def purge_old_state(now):
     for k in list(state.keys()):
-        if k.startswith("irish-"):
+        if k.startswith("irish-") or k.startswith("cairo-"):
             try:
                 ts = float(k.split("-", 1)[1])
                 if now - ts > 2 * 86400:
@@ -304,17 +309,42 @@ def tick():
     adhan_sets = sets.get("adhan", [])
     filler_sets = sets.get("filler", [])
 
-    # --- 1) Irish Adhan event? ---
-    for start in irish_events(now):
-        if not (start <= now) or not adhan_sets:
-            continue
+    wins = cairo_windows(now)
+    events = irish_events(now)
+
+    def adhan_idx_for(start, n):
         eid = f"irish-{int(start)}"
         if eid not in state:
-            # first sighting: assign rotation slot, then bump for next time
             state[eid] = state.get("adhan_idx", 0)
-            state["adhan_idx"] = (state.get("adhan_idx", 0) + 1) % len(adhan_sets)
+            state["adhan_idx"] = (state.get("adhan_idx", 0) + 1) % n
             save_state()
-        idx = state[eid] % len(adhan_sets)
+        return state[eid] % n
+
+    def event_span(start):
+        if not adhan_sets:
+            return 0.0
+        return load_chunkset(adhan_sets[adhan_idx_for(start, len(adhan_sets))])[1]
+
+    def gap(a0, a1, b0, b1):
+        if a1 < b0:
+            return b0 - a1
+        if b1 < a0:
+            return a0 - b1
+        return 0  # overlap
+
+    def event_blocked(start):
+        end = start + event_span(start)
+        return any(gap(start, end, w["start"], w["end"]) <= MIN_GAP for w in wins)
+
+    def window_blocked(w):
+        return any(gap(s, s + event_span(s), w["start"], w["end"]) <= MIN_GAP
+                   for s in events)
+
+    # --- 1) Irish Adhan event? ---
+    for start in events:
+        if not (start <= now) or not adhan_sets or event_blocked(start):
+            continue
+        idx = adhan_idx_for(start, len(adhan_sets))
         entries, total = load_chunkset(adhan_sets[idx])
         if entries and now < start + total:
             name = os.path.basename(adhan_sets[idx])
@@ -323,24 +353,43 @@ def tick():
             return
 
     # --- 2) Cairo Adhan suppression window? ---
-    for w in cairo_windows(now):
-        if not (w["start"] <= now <= w["end"]):
+    for w in wins:
+        if not (w["start"] <= now <= w["end"]) or window_blocked(w):
             continue
         elapsed = now - w["start"]
         if filler_sets:
-            # flat cycle plan across all filler sets
-            plan, total = [], 0.0
-            for sdir in filler_sets:
+            # whole filler files, one at a time, round-robin per window
+            wid = f"cairo-{int(w['start'])}"
+            if wid not in state:
+                state[wid] = state.get("filler_idx", 0)
+                state["filler_idx"] = (state.get("filler_idx", 0) + 1) % len(filler_sets)
+                save_state()
+            i = state[wid] % len(filler_sets)
+            remaining = elapsed
+            picked = None
+            for _ in range(len(filler_sets) + 1):
+                sdir = filler_sets[i % len(filler_sets)]
                 name = os.path.basename(sdir)
-                for d, u in load_chunkset(sdir)[0]:
-                    dur = num(d, SEG)
-                    plan.append((total, dur, f"/live-static/{name}/{u}"))
-                    total += dur
-            if plan:
-                pos = elapsed % total
-                picked = [p for p in plan if p[0] + p[1] > pos][:6] or plan[:1]
-                seq = int(w["start"]) - DELAY + int(picked[0][0])
-                emit(seq, [(f"{p[1]:.6f}", p[2]) for p in picked])
+                entries, total = load_chunkset(sdir)
+                if not entries:
+                    i += 1
+                    continue
+                if remaining < total:
+                    cum, sel = 0.0, []
+                    for d, u in entries:
+                        dur = num(d, SEG)
+                        if cum + dur > remaining and len(sel) < 6:
+                            sel.append((f"{dur:.6f}",
+                                        f"/live-static/{name}/{u}"))
+                        cum += dur
+                    picked = sel or [(entries[0][0],
+                                      f"/live-static/{name}/{entries[0][1]}")]
+                    break
+                remaining -= total
+                i += 1
+            if picked:
+                seq = int(w["start"]) - DELAY + int(elapsed) - int(remaining)
+                emit(seq, picked)
                 return
         else:
             # no fillers: skip the Adhan content entirely and jump ahead
