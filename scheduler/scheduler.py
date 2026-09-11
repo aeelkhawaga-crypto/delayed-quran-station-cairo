@@ -145,11 +145,11 @@ def cairo_prayers(day):
     """UTC epochs for the five prayers on the given UTC date (cached)."""
     key = day.isoformat()
     try:
-        c = json.load(open(CAIRO_CACHE))
-        if c.get("date") == key:
-            return c["utc"]
+        days = json.load(open(CAIRO_CACHE)).get("days", {})
     except Exception:
-        pass
+        days = {}
+    if key in days:
+        return days[key]
     ddmmyyyy = day.strftime("%d-%m-%Y")
     url = (f"https://api.aladhan.com/v1/timings/{ddmmyyyy}"
            f"?latitude={CAIRO_LAT}&longitude={CAIRO_LON}"
@@ -161,9 +161,15 @@ def cairo_prayers(day):
             dt = datetime.datetime.fromisoformat(d[p])
             utc[p] = dt.astimezone(UTC).timestamp()
         os.makedirs(SCHED, exist_ok=True)
+        days[key] = utc
+        # keep only today/tomorrow to bound the file
+        today = datetime.datetime.now(UTC).date()
+        keep = {k: v for k, v in days.items()
+                if today - datetime.timedelta(days=1) <= datetime.date.fromisoformat(k)
+                <= today + datetime.timedelta(days=1)}
         tmp = CAIRO_CACHE + ".tmp"
         with open(tmp, "w") as f:
-            json.dump({"date": key, "utc": utc}, f)
+            json.dump({"days": keep}, f)
         os.replace(tmp, CAIRO_CACHE)
         log(f"Cairo timings cached for {key}")
         return utc

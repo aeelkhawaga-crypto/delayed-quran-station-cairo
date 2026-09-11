@@ -28,11 +28,11 @@ now = datetime.datetime.now(UTC).timestamp()
 # --- today's + yesterday's Cairo prayer times (UTC epochs), cached ---
 def fetch(day):
     key = day.isoformat()
-    cache = f"/opt/quran-radio/schedule/cairo-times.json"
+    cache = "/opt/quran-radio/schedule/cairo-times.json"
     try:
-        c = json.load(open(cache))
-        if c.get("date") == key:
-            return c["utc"]
+        days = json.load(open(cache)).get("days", {})
+        if key in days:
+            return days[key]
     except Exception:
         pass
     url = (f"https://api.aladhan.com/v1/timings/{day.strftime('%d-%m-%Y')}"
@@ -44,9 +44,14 @@ def fetch(day):
             d = json.load(r)["data"]["timings"]
         utc = {p: datetime.datetime.fromisoformat(d[p]).astimezone(UTC).timestamp()
                for p in ("Fajr", "Dhuhr", "Asr", "Maghrib", "Isha")}
+        days[key] = utc
+        today = datetime.datetime.now(UTC).date()
+        keep = {k: v for k, v in days.items()
+                if today - datetime.timedelta(days=1) <= datetime.date.fromisoformat(k)
+                <= today + datetime.timedelta(days=1)}
         os.makedirs(os.path.dirname(cache), exist_ok=True)
         tmp = cache + ".tmp"
-        json.dump({"date": key, "utc": utc}, open(tmp, "w"))
+        json.dump({"days": keep}, open(tmp, "w"))
         os.replace(tmp, cache)
         return utc
     except Exception as e:
