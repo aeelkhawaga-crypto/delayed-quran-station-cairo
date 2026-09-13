@@ -58,7 +58,7 @@ def fetch(day):
         print(f"[harvest] timings fetch failed for {key}: {e}")
         return None
 
-today = datetime.date.fromtimestamp(now, UTC)
+today = datetime.datetime.fromtimestamp(now, UTC).date()
 targets = {}
 for d in (today - datetime.timedelta(days=1), today):
     pr = fetch(d)
