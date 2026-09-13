@@ -356,7 +356,7 @@ def tick():
         if eid not in state:
             state[eid] = state.get("adhan_idx", 0)
             state["adhan_idx"] = (state.get("adhan_idx", 0) + 1) % n
-            save_state()
+            save_state(state)
         return state[eid] % n
 
     def event_span(start):
@@ -402,7 +402,7 @@ def tick():
             if wid not in state:
                 state[wid] = state.get("filler_idx", 0)
                 state["filler_idx"] = (state.get("filler_idx", 0) + 1) % len(filler_sets)
-                save_state()
+                save_state(state)
             i = state[wid] % len(filler_sets)
             remaining = elapsed
             picked = None
