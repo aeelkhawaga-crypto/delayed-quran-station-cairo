@@ -36,6 +36,7 @@ ADHANS = os.environ.get("ADHAN_DIR", "/adhans")
 FILLERS = os.environ.get("FILLER_DIR", "/fillers")
 SCHED = os.environ.get("SCHEDULE_DIR", "/schedule")
 IRISH_FILE = os.path.join(SCHED, "irish-times.txt")
+IRISH_JSON = os.path.join(SCHED, "dublin-prayer-times.json")
 CAIRO_CACHE = os.path.join(SCHED, "cairo-times.json")
 STATE_FILE = os.path.join(LIVE, ".scheduler-state.json")
 
@@ -110,7 +111,11 @@ def purge_old_state(now):
 # ---------------- irish timetable ----------------
 
 def irish_events(now):
-    """Event start epochs (UTC) near now, from the user's timetable file."""
+    """Event start epochs (UTC) near now: manual timetable + IFI yearly JSON."""
+    return sorted(set(_irish_events_text(now) + _irish_events_json(now)))
+
+def _irish_events_text(now):
+    """From the user's manual timetable file."""
     events = []
     try:
         lines = open(IRISH_FILE).read().splitlines()
@@ -137,7 +142,35 @@ def irish_events(now):
                 continue
             local = datetime.datetime(d.year, d.month, d.day, hh, mm, tzinfo=UTC)
             events.append(local.timestamp() - dublin_offset(local))
-    return sorted(set(e for e in events if abs(e - now) < 3 * 86400))
+    return events
+
+def _irish_events_json(now):
+    """From the Islamic Foundation of Ireland yearly timetable (MM-DD keys,
+    Europe/Dublin local times, repeating annually)."""
+    try:
+        days = json.load(open(IRISH_JSON)).get("days", {})
+    except Exception:
+        return []
+    if not days:
+        return []
+    events = []
+    off = dublin_offset(datetime.datetime.fromtimestamp(now, UTC))
+    dublin_today = datetime.datetime.fromtimestamp(now + off, UTC).date()
+    for delta in (-1, 0, 1):
+        d = dublin_today + datetime.timedelta(days=delta)
+        entry = days.get(f"{d.month:02d}-{d.day:02d}")
+        if not entry:
+            continue
+        times = entry.get("times") or entry.get("standardTimes") or {}
+        for p in ("fajr", "dhuhr", "asr", "maghrib", "isha"):
+            t = times.get(p)
+            if not t:
+                continue
+            hh, mm = str(t).split(":")[:2]
+            local = datetime.datetime(d.year, d.month, d.day,
+                                      int(hh), int(mm), tzinfo=UTC)
+            events.append(local.timestamp() - off)
+    return events
 
 # ---------------- cairo timings ----------------
 
