@@ -335,6 +335,26 @@ def emit(seq, entries):
             f.write(f"#EXTINF:{dur},\n{uri}\n")
     os.replace(tmp, os.path.join(LIVE, "delayed.m3u8"))
 
+def sliding_emit(seq_base, chunksets, elapsed, window=4):
+    """Publish pre-chunked content as a live sliding window: only segments
+    that have started airing (plus a small tail) are listed, so players at
+    the live edge follow the content in real time instead of jumping to its
+    end. chunksets: ordered [(name, entries), ...] played back to back.
+    Returns True if the playlist was emitted."""
+    segs = []  # (index, start_offset, raw_dur, uri)
+    cum = 0.0
+    for name, entries in chunksets:
+        for d, u in entries:
+            segs.append((len(segs), cum, d, f"/live-static/{name}/{u}"))
+            cum += num(d, SEG)
+    if not segs:
+        return False
+    sel = [(j, d, u) for j, s, d, u in segs if s + num(d, SEG) > elapsed - window * SEG and s <= elapsed]
+    if not sel:
+        return False
+    emit(seq_base + sel[0][0] * SEG, [(d, u) for _, d, u in sel])
+    return True
+
 def emit_header_only():
     if not os.path.exists(os.path.join(LIVE, "delayed.m3u8")):
         emit(0, [])
@@ -387,15 +407,13 @@ def tick():
         entries, total = load_chunkset(adhan_sets[idx])
         if entries and now < start + total:
             name = os.path.basename(adhan_sets[idx])
-            emit(int(start) - DELAY,
-                 [(d, f"/live-static/{name}/{u}") for d, u in entries])
-            return
+            if sliding_emit(int(start) - DELAY, [(name, entries)], now - start):
+                return
 
     # --- 2) Cairo Adhan suppression window? ---
     for w in wins:
         if not (w["start"] <= now <= w["end"]) or window_blocked(w):
             continue
-        elapsed = now - w["start"]
         if filler_sets:
             # whole filler files, one at a time, round-robin per window
             wid = f"cairo-{int(w['start'])}"
@@ -404,35 +422,17 @@ def tick():
                 state["filler_idx"] = (state.get("filler_idx", 0) + 1) % len(filler_sets)
                 save_state(state)
             i = state[wid] % len(filler_sets)
-            remaining = elapsed
-            picked = None
-            for _ in range(len(filler_sets) + 1):
-                sdir = filler_sets[i % len(filler_sets)]
-                name = os.path.basename(sdir)
-                entries, total = load_chunkset(sdir)
-                if not entries:
-                    i += 1
-                    continue
-                if remaining < total:
-                    cum, sel = 0.0, []
-                    for d, u in entries:
-                        dur = num(d, SEG)
-                        if cum + dur > remaining and len(sel) < 6:
-                            sel.append((f"{dur:.6f}",
-                                        f"/live-static/{name}/{u}"))
-                        cum += dur
-                    picked = sel or [(entries[0][0],
-                                      f"/live-static/{name}/{entries[0][1]}")]
-                    break
-                remaining -= total
-                i += 1
-            if picked:
-                seq = int(w["start"]) - DELAY + int(elapsed) - int(remaining)
-                emit(seq, picked)
+            ordered = []
+            for k in range(len(filler_sets)):
+                sdir = filler_sets[(i + k) % len(filler_sets)]
+                entries, _ = load_chunkset(sdir)
+                if entries:
+                    ordered.append((os.path.basename(sdir), entries))
+            if sliding_emit(int(w["start"]) - DELAY, ordered, now - w["start"]):
                 return
         else:
             # no fillers: skip the Adhan content entirely and jump ahead
-            eff_delay = now - (w["content_end"] + elapsed)
+            eff_delay = now - (w["content_end"] + (now - w["start"]))
             entries = delayed_entries(now - eff_delay)
             if entries:
                 emit(int(entries_ts(entries[0])), entries)
