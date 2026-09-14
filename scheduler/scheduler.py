@@ -264,7 +264,9 @@ def retimed_chunk(f, sdir):
     filters = []
     if 0.5 <= tempo <= 2.0:
         filters.append(f"atempo={tempo:.5f}")
-    filters.append(f"apad,atrim=0:{target}")
+    # trim a hair short: the AAC priming frame (~23ms) would otherwise spill
+    # past the target and the muxer emits a tiny tail segment
+    filters.append(f"apad,atrim=0:{target - 0.06:.3f}")
     return subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", f,
                            "-vn", "-af", ",".join(filters),
                            "-c:a", "aac", "-b:a", "96k", "-ac", "2", "-ar", "44100",
@@ -284,7 +286,7 @@ def ensure_chunksets():
             files, sig = folder_sig(folder)
         except Exception:
             files, sig = [], ""
-        tag = os.path.join(STATIC, f".{kind}-v2.sig")
+        tag = os.path.join(STATIC, f".{kind}-v3.sig")
         try:
             old = open(tag).read()
         except Exception:
@@ -321,7 +323,7 @@ def ensure_starter_chunksets():
         if prayer not in {p.lower() for p in PRAYERS}:
             continue
         sdir = os.path.join(STATIC, f"starter-{prayer}")
-        tag = os.path.join(STATIC, f".starter-{prayer}-v1.sig")
+        tag = os.path.join(STATIC, f".starter-{prayer}-v2.sig")
         sig = f"{os.path.basename(f)}:{os.path.getmtime(f)}"
         try:
             old = open(tag).read()
@@ -446,13 +448,17 @@ def tick():
         return
     durs = splice_durs()
     runs = splice_runs()
+    def in_runs(ts):
+        return any(a <= ts <= b for a, b in runs)
     items, prev = [], None
     for e in entries:
         ts = int(entries_ts(e))
         name = os.path.basename(e[1])
         dur = durs.get(name, e[0])
-        sp = any(a <= ts <= b for a, b in runs)
-        if prev is not None and sp != prev:
+        sp = in_runs(ts)
+        if prev is None:
+            prev = in_runs(ts - SEG)  # segment just before the window
+        if sp != prev:
             items.append((None, None))
         items.append((dur, e[1]))
         prev = sp

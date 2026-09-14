@@ -83,7 +83,7 @@ def archive_slots():
         m = re.fullmatch(r"(\d{14})\.ts", os.path.basename(line.strip()))
         if m:
             dt = datetime.datetime.strptime(m.group(1), "%Y%m%d%H%M%S").replace(tzinfo=UTC)
-            out.append((int(dt.timestamp()), m.group(1)))
+            out.append((int(dt.timestamp()), m.group(0)))
     return sorted(out)
 
 
@@ -256,7 +256,7 @@ def tick():
     runs[:] = [r for r in runs if r[1] + DELAY + 3600 > now]
     durs_all = state["durs"] = {
         k: v for k, v in durs_all.items()
-        if any(a <= int(datetime.datetime.strptime(k, "%Y%m%d%H%M%S")
+        if any(a <= int(datetime.datetime.strptime(k, "%Y%m%d%H%M%S.ts")
                         .replace(tzinfo=UTC).timestamp()) <= b
                for a, b in runs)}
     for k in list(done):
