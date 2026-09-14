@@ -442,26 +442,18 @@ def tick():
     # Single path: the delayed window is always archive segments; the
     # splicer rewrites the segment *files* inside the window, so adhan /
     # filler content simply plays through the continuous archive sequence.
+    # No EXT-X-DISCONTINUITY: audio-only players (hls.js especially) are
+    # prone to stalling on discontinuities; codec params are identical
+    # across spliced/recorder segments, so a plain content change is safe.
     entries = delayed_entries(now - DELAY)
     if not entries:
         emit_header_only()
         return
     durs = splice_durs()
-    runs = splice_runs()
-    def in_runs(ts):
-        return any(a <= ts <= b for a, b in runs)
-    items, prev = [], None
+    items = []
     for e in entries:
-        ts = int(entries_ts(e))
         name = os.path.basename(e[1])
-        dur = durs.get(name, e[0])
-        sp = in_runs(ts)
-        if prev is None:
-            prev = in_runs(ts - SEG)  # segment just before the window
-        if sp != prev:
-            items.append((None, None))
-        items.append((dur, e[1]))
-        prev = sp
+        items.append((durs.get(name, e[0]), e[1]))
     emit(int(entries_ts(entries[0])), items)
 
 def main():
