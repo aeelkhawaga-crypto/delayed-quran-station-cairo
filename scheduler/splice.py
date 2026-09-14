@@ -256,7 +256,7 @@ def tick():
     runs[:] = [r for r in runs if r[1] + DELAY + 3600 > now]
     durs_all = state["durs"] = {
         k: v for k, v in durs_all.items()
-        if any(a <= int(datetime.datetime.strptime(k, "%Y%m%d%H%M%S.ts")
+        if any(a <= int(datetime.datetime.strptime(k.split(".")[0], "%Y%m%d%H%M%S")
                         .replace(tzinfo=UTC).timestamp()) <= b
                for a, b in runs)}
     for k in list(done):
