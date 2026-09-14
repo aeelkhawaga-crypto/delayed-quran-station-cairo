@@ -29,7 +29,7 @@ the old bytes for a spliced slot. Chunksets are pre-retimed to whole
 full segment; the true durations are handed to the scheduler via
 .splice-durs.json so the playlist timeline stays exact.
 """
-import os, re, sys, json, glob, time, datetime
+import os, re, sys, json, glob, time, datetime, subprocess, shutil
 
 sys.path.insert(0, "/")
 import scheduler as sch
@@ -102,25 +102,68 @@ def starter_dirs():
             for d in glob.glob(os.path.join(STATIC, "starter-*"))}
 
 
-def replace_slots(slots, chunks, now):
+FRAME_TICKS = int(1024 * 90000 / 44100)  # one AAC frame in 90kHz ticks
+
+def _pts_list(path):
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0",
+                            "-show_entries", "packet=pts", "-of", "csv=p=0", path],
+                           capture_output=True, text=True, timeout=30)
+        vals = []
+        for tok in r.stdout.split():
+            try:
+                vals.append(int(tok))
+            except ValueError:
+                pass
+        return vals
+    except Exception:
+        return []
+
+def _write_aligned(src, dst, start_pts):
+    """Remux src so its first audio PTS == start_pts (90kHz ticks), keeping
+    the delayed stream's timestamp continuity across spliced content.
+    Players stall on mid-stream timestamp resets, so this matters more
+    than the audio payload itself."""
+    vals = _pts_list(src)
+    if not vals:
+        shutil.copyfile(src, dst)
+        return
+    off = (start_pts - vals[0]) / 90000.0
+    r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", src, "-c", "copy",
+                        "-muxdelay", "0", "-muxpreload", "0",
+                        "-output_ts_offset", f"{off:.6f}", dst],
+                       capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        log(f"pts-align remux failed for {src}: {r.stderr.strip()[:150]} — plain copy")
+        shutil.copyfile(src, dst)
+
+def replace_slots(slots, chunks, now, prev_path):
     """Overwrite the given archive slots with chunk segments 1:1 in order,
     skipping pairs already fully past. slots: [(ts, name)];
-    chunks: [(dur, path)]. Returns (run, durs) or (None, {})."""
+    chunks: [(dur, path)]. prev_path: archive segment airing right before
+    slots[0]; spliced chunks continue its timestamps. Returns (run, durs)
+    or (None, {})."""
     dropped = 0
     while dropped < len(slots) and slots[dropped][0] + DELAY + EXPOSURE < now:
         dropped += 1
     slots, chunks = slots[dropped:], chunks[dropped:]
+    if not slots:
+        return None, {}
+    prev_vals = _pts_list(prev_path) if prev_path else []
+    base = (max(prev_vals) + FRAME_TICKS) if prev_vals else None
     durs, n = {}, 0
     for (ts, name), (dur, src) in zip(slots, chunks):
+        tmp = os.path.join(ARCHIVE, "." + name + ".tmp")
         try:
-            with open(src, "rb") as f:
-                data = f.read()
+            if base is not None:
+                _write_aligned(src, tmp, base + int(n * SEG * 90000))
+            else:
+                shutil.copyfile(src, tmp)
         except Exception as e:
             log(f"chunk unreadable {src}: {e} — will retry")
+            if os.path.exists(tmp):
+                os.remove(tmp)
             return None, {}
-        tmp = os.path.join(ARCHIVE, "." + name + ".tmp")
-        with open(tmp, "wb") as f:
-            f.write(data)
         os.replace(tmp, os.path.join(ARCHIVE, name))
         durs[name] = dur
         n += 1
@@ -166,6 +209,11 @@ def tick():
             return below[-1]
         return None
 
+    def prev_slot_path(ts):
+        """Archive segment file airing right before grid time ts."""
+        earlier = [(t, n) for t, n in slots if t < ts]
+        return os.path.join(ARCHIVE, earlier[-1][1]) if earlier else None
+
     def event_span(prayer):
         if not adhan_sets:
             return 0.0
@@ -206,14 +254,15 @@ def tick():
         if schunks:
             s_slots = [(ts, n) for ts, n in slots if anchor - spre <= ts < anchor]
             if s_slots:
-                run, d = replace_slots(s_slots, schunks, now)
+                run, d = replace_slots(s_slots, schunks, now,
+                                       prev_slot_path(s_slots[0][0]))
                 if run is None:
                     continue
                 runs.append(run)
                 durs_all.update(d)
                 log(f"irish@{int(start)}: starter-{prayer} spliced into slots "
                     f"{run[0]}..{run[1]}")
-        run, d = replace_slots(adhan_slots, achunks, now)
+        run, d = replace_slots(adhan_slots, achunks, now, prev_slot_path(anchor))
         if run is None:
             continue
         runs.append(run)
@@ -242,7 +291,9 @@ def tick():
             continue
         c_slots = [(ts, n) for ts, n in slots
                    if w["start"] - DELAY - SEG < ts < w["end"] - DELAY]
-        run, d = replace_slots(c_slots, chain, now)
+        if not c_slots:
+            continue
+        run, d = replace_slots(c_slots, chain, now, prev_slot_path(c_slots[0][0]))
         if run is None:
             continue
         runs.append(run)
