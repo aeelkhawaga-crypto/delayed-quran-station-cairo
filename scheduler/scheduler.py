@@ -24,6 +24,7 @@ LIVE = os.environ.get("LIVE_DIR", "/live")
 STATIC = os.environ.get("STATIC_DIR", "/live-static")
 ADHANS = os.environ.get("ADHAN_DIR", "/adhans")
 FILLERS = os.environ.get("FILLER_DIR", "/fillers")
+STARTERS = os.environ.get("STARTER_DIR", "/starters")
 SCHED = os.environ.get("SCHEDULE_DIR", "/schedule")
 IRISH_FILE = os.path.join(SCHED, "irish-times.txt")
 IRISH_JSON = os.path.join(SCHED, "dublin-prayer-times.json")
@@ -105,7 +106,9 @@ def irish_events(now):
     return sorted(set(_irish_events_text(now) + _irish_events_json(now)))
 
 def _irish_events_text(now):
-    """From the user's manual timetable file."""
+    """From the user's manual timetable file: [(start, prayer|None)].
+    A line may end with a prayer name (e.g. "13:23 dhuhr" or
+    "2026-09-14 08:20 fajr") to attach a starter for one-off events."""
     events = []
     try:
         lines = open(IRISH_FILE).read().splitlines()
@@ -116,10 +119,13 @@ def _irish_events_text(now):
         line = line.split("#", 1)[0].strip()
         if not line:
             continue
-        m = re.fullmatch(r"(?:(\S+)\s+)?(\d{1,2}):(\d{2})", line)
+        m = re.fullmatch(r"(?:(\S+)\s+)?(\d{1,2}):(\d{2})(?:\s+([A-Za-z]+))?", line)
         if not m:
             continue
         daypart, hh, mm = m.group(1), int(m.group(2)), int(m.group(3))
+        prayer = m.group(4).lower() if m.group(4) else None
+        if prayer not in {p.lower() for p in PRAYERS}:
+            prayer = None
         for delta in (-1, 0, 1):
             d = day + datetime.timedelta(days=delta)
             if daypart is None:
@@ -131,12 +137,12 @@ def _irish_events_text(now):
             if not ok:
                 continue
             local = datetime.datetime(d.year, d.month, d.day, hh, mm, tzinfo=UTC)
-            events.append(local.timestamp() - dublin_offset(local))
+            events.append((local.timestamp() - dublin_offset(local), prayer))
     return events
 
 def _irish_events_json(now):
     """From the Islamic Foundation of Ireland yearly timetable (MM-DD keys,
-    Europe/Dublin local times, repeating annually)."""
+    Europe/Dublin local times, repeating annually): [(start, prayer)]."""
     try:
         days = json.load(open(IRISH_JSON)).get("days", {})
     except Exception:
@@ -159,8 +165,20 @@ def _irish_events_json(now):
             hh, mm = str(t).split(":")[:2]
             local = datetime.datetime(d.year, d.month, d.day,
                                       int(hh), int(mm), tzinfo=UTC)
-            events.append(local.timestamp() - off)
+            events.append((local.timestamp() - off, p))
     return events
+
+def irish_prayer_events(now):
+    """[(start_epoch, prayer|None)] near now: manual timetable + IFI JSON."""
+    tagged = {}
+    for start, prayer in _irish_events_text(now):
+        tagged[start] = prayer
+    for start, prayer in _irish_events_json(now):
+        tagged.setdefault(start, prayer)
+    return sorted(tagged.items())
+
+def irish_events(now):
+    return [s for s, _ in irish_prayer_events(now)]
 
 # ---------------- cairo timings ----------------
 
@@ -216,12 +234,46 @@ def cairo_windows(now):
                              "content_end": pt + WIN_POST})
     return wins
 
-# ---------------- chunksets (adhan / filler) ----------------
+# ---------------- chunksets (adhan / filler / starter) ----------------
 
 def folder_sig(folder):
     files = sorted(f for f in glob.glob(os.path.join(folder, "*"))
                    if os.path.splitext(f)[1].lower() in AUDIO_EXT)
     return files, "|".join(f"{os.path.basename(f)}:{os.path.getmtime(f)}" for f in files)
+
+def probe_duration(path):
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                            "format=duration", "-of", "csv=p=0", path],
+                           capture_output=True, text=True, timeout=60)
+        return float(r.stdout.strip())
+    except Exception:
+        return None
+
+def retimed_chunk(f, sdir):
+    """Chunk an audio file into whole 10s slots: retime with atempo
+    (imperceptible) to an exact multiple of SEG, then pad/trim to exact,
+    so every segment is a full slot and slots never carry short tails."""
+    dur = probe_duration(f)
+    n = 1
+    if dur:
+        cands = [k for k in (round(dur / SEG) + d for d in (-1, 0, 1)) if k >= 1]
+        n = min(cands, key=lambda k: abs(dur / (k * SEG) - 1))
+    target = n * SEG
+    tempo = dur / target if dur else 1.0
+    filters = []
+    if 0.5 <= tempo <= 2.0:
+        filters.append(f"atempo={tempo:.5f}")
+    filters.append(f"apad,atrim=0:{target}")
+    return subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", f,
+                           "-vn", "-af", ",".join(filters),
+                           "-c:a", "aac", "-b:a", "96k", "-ac", "2", "-ar", "44100",
+                           "-f", "hls", "-hls_time", str(SEG),
+                           "-hls_list_size", "0",
+                           "-hls_segment_filename",
+                           os.path.join(sdir, "seg_%04d.ts"),
+                           os.path.join(sdir, "playlist.m3u8")],
+                          capture_output=True, text=True)
 
 def ensure_chunksets():
     """(Re)chunk adhan/filler audio into static HLS segment sets on change."""
@@ -232,7 +284,7 @@ def ensure_chunksets():
             files, sig = folder_sig(folder)
         except Exception:
             files, sig = [], ""
-        tag = os.path.join(STATIC, f".{kind}.sig")
+        tag = os.path.join(STATIC, f".{kind}-v2.sig")
         try:
             old = open(tag).read()
         except Exception:
@@ -246,14 +298,7 @@ def ensure_chunksets():
         for i, f in enumerate(files):
             sdir = os.path.join(STATIC, f"{kind}-{i}")
             os.makedirs(sdir, exist_ok=True)
-            r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", f,
-                                "-vn", "-c:a", "aac", "-b:a", "96k",
-                                "-f", "hls", "-hls_time", str(SEG),
-                                "-hls_list_size", "0",
-                                "-hls_segment_filename",
-                                os.path.join(sdir, "seg_%04d.ts"),
-                                os.path.join(sdir, "playlist.m3u8")],
-                               capture_output=True, text=True)
+            r = retimed_chunk(f, sdir)
             if r.returncode != 0:
                 log(f"chunking failed for {f}: {r.stderr.strip()[:200]}")
                 shutil.rmtree(sdir, ignore_errors=True)
@@ -264,6 +309,39 @@ def ensure_chunksets():
         sets[kind] = made
         log(f"{kind}: {len(made)} file(s) chunked")
     return sets
+
+def ensure_starter_chunksets():
+    """Per-prayer starters (adhan-prefixes), each retimed to whole slots."""
+    os.makedirs(STATIC, exist_ok=True)
+    out = {}
+    for f in sorted(glob.glob(os.path.join(STARTERS, "*"))):
+        if os.path.splitext(f)[1].lower() not in AUDIO_EXT:
+            continue
+        prayer = os.path.splitext(os.path.basename(f))[0].lower()
+        if prayer not in {p.lower() for p in PRAYERS}:
+            continue
+        sdir = os.path.join(STATIC, f"starter-{prayer}")
+        tag = os.path.join(STATIC, f".starter-{prayer}-v1.sig")
+        sig = f"{os.path.basename(f)}:{os.path.getmtime(f)}"
+        try:
+            old = open(tag).read()
+        except Exception:
+            old = None
+        if sig == old and glob.glob(os.path.join(sdir, "seg_*.ts")):
+            out[prayer] = sdir
+            continue
+        shutil.rmtree(sdir, ignore_errors=True)
+        os.makedirs(sdir, exist_ok=True)
+        r = retimed_chunk(f, sdir)
+        if r.returncode != 0:
+            log(f"chunking failed for starter {f}: {r.stderr.strip()[:200]}")
+            shutil.rmtree(sdir, ignore_errors=True)
+            continue
+        with open(tag, "w") as tf:
+            tf.write(sig)
+        out[prayer] = sdir
+        log(f"starter: {prayer} chunked")
+    return out
 
 def load_chunkset(sdir):
     entries, dur = [], None
@@ -344,10 +422,20 @@ def emit_header_only():
 
 # ---------------- main loop ----------------
 
+DURS_FILE = os.path.join(SCHED, ".splice-durs.json")
+
+def splice_durs():
+    """True durations {segment_name: dur} for spliced slots, from the splicer."""
+    try:
+        return json.load(open(DURS_FILE)).get("durs", {})
+    except Exception:
+        return {}
+
 def tick():
     now = time.time()
     purge_old_state(now)
-    ensure_chunksets()  # chunksets are the splicer's source material
+    ensure_chunksets()          # adhan/filler chunksets: splicer source material
+    ensure_starter_chunksets()  # per-prayer starters
 
     # Single path: the delayed window is always archive segments; the
     # splicer rewrites the segment *files* inside the window, so adhan /
@@ -356,19 +444,19 @@ def tick():
     if not entries:
         emit_header_only()
         return
+    durs = splice_durs()
     runs = splice_runs()
-    if runs:
-        items, prev = [], None
-        for e in entries:
-            ts = int(entries_ts(e))
-            sp = any(a <= ts <= b for a, b in runs)
-            if prev is not None and sp != prev:
-                items.append((None, None))
-            items.append(e)
-            prev = sp
-        emit(int(entries_ts(entries[0])), items)
-    else:
-        emit(int(entries_ts(entries[0])), entries)
+    items, prev = [], None
+    for e in entries:
+        ts = int(entries_ts(e))
+        name = os.path.basename(e[1])
+        dur = durs.get(name, e[0])
+        sp = any(a <= ts <= b for a, b in runs)
+        if prev is not None and sp != prev:
+            items.append((None, None))
+        items.append((dur, e[1]))
+        prev = sp
+    emit(int(entries_ts(entries[0])), items)
 
 def main():
     log(f"starting: delay={DELAY}s seg={SEG}s")

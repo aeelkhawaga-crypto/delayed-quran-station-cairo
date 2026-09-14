@@ -27,6 +27,7 @@ services:
       - ./data/static:/live-static
       - ./adhans:/adhans:ro
       - ./fillers:/fillers:ro
+      - ./adhan-prefixes:/starters:ro
       - ./schedule:/schedule
     logging:
       driver: json-file

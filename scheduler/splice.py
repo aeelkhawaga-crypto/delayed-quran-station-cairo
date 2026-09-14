@@ -5,14 +5,17 @@ Runs as a separate job alongside the scheduler. Instead of switching the
 live playlist between archive/adhan/filler URIs (which forced players to
 re-sync and could mix buffered chunks), this job OVERWRITES the archive
 segment files themselves, inside the delayed window: about a minute
-before an Irish Adhan airs, the archive slots it will occupy are replaced
-with the adhan chunks, byte for byte, under the same filenames. The
-playlist stays one continuous archive sequence; players simply play
-through the filenames and hear adhan where adhan belongs.
+before content airs, the archive slots it will occupy are replaced with
+the adhan/filler/starter chunks, byte for byte, under the same filenames.
+The playlist stays one continuous archive sequence; players simply play
+through the filenames and hear the inserted content where it belongs.
 
 - Irish Adhan: at each event one adhan file (round-robin) occupies the
-  slots from the event start; afterwards the stream continues from where
-  the adhan ended (the skipped gap is an accepted tradeoff).
+  slots from the prayer's grid anchor; the stream continues afterwards
+  from where the adhan ended (the skipped gap is an accepted tradeoff).
+- Prayer starters: a short starter (adhan-prefixes/<Prayer>.mp3) occupies
+  the slots ending exactly at the adhan's anchor, so the adhan itself
+  stays on time.
 - Cairo Adhan suppression: during each Cairo window the slots are filled
   with whole filler files, one at a time, round-robin per window. With no
   fillers the Cairo adhan simply stays audible.
@@ -21,7 +24,10 @@ through the filenames and hear adhan where adhan belongs.
 
 A slot is fetched by players only during the ~30s before it airs, so the
 splice happens LEAD seconds before the event; that way no player holds
-the old bytes for a spliced slot.
+the old bytes for a spliced slot. Chunksets are pre-retimed to whole
+10s slots by the scheduler, so every replaced slot carries exactly one
+full segment; the true durations are handed to the scheduler via
+.splice-durs.json so the playlist timeline stays exact.
 """
 import os, re, sys, json, glob, time, datetime
 
@@ -41,6 +47,7 @@ LOOP = 5.0
 
 STATE_FILE = os.path.join(sch.SCHED, ".splicer-state.json")
 RUNS_FILE = os.path.join(sch.SCHED, ".splice-runs.json")
+DURS_FILE = os.path.join(sch.SCHED, ".splice-durs.json")
 
 
 def log(msg):
@@ -81,43 +88,45 @@ def archive_slots():
 
 
 def chunk_segments(sdir):
-    """Absolute paths of a chunkset's segments, in order."""
+    """[(dur, abspath)] of a chunkset's segments, in order."""
     entries, _ = sch.load_chunkset(sdir)
-    return [os.path.join(sdir, u) for _, u in entries]
+    return [(d, os.path.join(sdir, u)) for d, u in entries]
 
 
 def chunkset_dirs(kind):
     return sorted(glob.glob(os.path.join(STATIC, f"{kind}-*")))
 
 
-def splice_slots(c_start, c_end, chunks, now):
-    """Replace archive files whose content ts falls in (c_start-SEG, c_end)
-    with successive chunk segments, 1:1 in order. Slots that already aired
-    are dropped together with their chunk counterparts. Returns [t0, t1]
-    content range of the replaced run, or None if nothing was replaced."""
-    slots = [(ts, n) for ts, n in archive_slots() if c_start - SEG < ts < c_end]
-    if not slots:
-        return None
+def starter_dirs():
+    return {os.path.basename(d)[len("starter-"):]: d
+            for d in glob.glob(os.path.join(STATIC, "starter-*"))}
+
+
+def replace_slots(slots, chunks, now):
+    """Overwrite the given archive slots with chunk segments 1:1 in order,
+    skipping pairs already fully past. slots: [(ts, name)];
+    chunks: [(dur, path)]. Returns (run, durs) or (None, {})."""
     dropped = 0
     while dropped < len(slots) and slots[dropped][0] + DELAY + EXPOSURE < now:
         dropped += 1
     slots, chunks = slots[dropped:], chunks[dropped:]
-    n = 0
-    for (ts, name), src in zip(slots, chunks):
+    durs, n = {}, 0
+    for (ts, name), (dur, src) in zip(slots, chunks):
         try:
             with open(src, "rb") as f:
                 data = f.read()
         except Exception as e:
             log(f"chunk unreadable {src}: {e} — will retry")
-            return None
+            return None, {}
         tmp = os.path.join(ARCHIVE, "." + name + ".tmp")
         with open(tmp, "wb") as f:
             f.write(data)
         os.replace(tmp, os.path.join(ARCHIVE, name))
+        durs[name] = dur
         n += 1
     if not n:
-        return None
-    return [slots[0][0], slots[n - 1][0]]
+        return None, {}
+    return [slots[0][0], slots[n - 1][0]], durs
 
 
 def gap(a0, a1, b0, b1):
@@ -128,50 +137,91 @@ def gap(a0, a1, b0, b1):
     return 0
 
 
+def flatten(sets, start_idx):
+    """Chain filler chunksets in order, starting at start_idx (round-robin)."""
+    out = []
+    for k in range(len(sets)):
+        out.extend(chunk_segments(sets[(start_idx + k) % len(sets)]))
+    return out
+
+
 def tick():
     now = time.time()
     adhan_sets = chunkset_dirs("adhan")
     filler_sets = chunkset_dirs("filler")
-    events = sch.irish_events(now)
+    starters = starter_dirs()
+    events = sch.irish_prayer_events(now)
     wins = sch.cairo_windows(now)
     runs = state.setdefault("runs", [])
     done = state.setdefault("spliced", {})
+    durs_all = state.setdefault("durs", {})
     changed = False
 
-    def span_of(start):
-        idx = state.get("adhan_idx", 0)
+    slots = archive_slots()
+
+    def grid_anchor(c):
+        """Archive grid point at or just before content time c."""
+        below = [ts for ts, _ in slots if ts <= c]
+        if below and c - below[-1] < SEG:
+            return below[-1]
+        return None
+
+    def event_span(prayer):
         if not adhan_sets:
             return 0.0
-        return len(chunk_segments(adhan_sets[idx % len(adhan_sets)])) * SEG
+        i = state.get("adhan_idx", 0) % len(adhan_sets)
+        sp = len(chunk_segments(starters[prayer])) * SEG if prayer in starters else 0
+        return sp + len(chunk_segments(adhan_sets[i])) * SEG
 
-    # --- Irish Adhan events ---
-    for start in events:
+    # --- Irish Adhan events (with prayer starters) ---
+    for start, prayer in events:
         if start > now + LEAD:
             continue
         key = f"irish-{int(start)}"
         if key in done:
             continue
-        if not adhan_sets:
+        if not adhan_sets or not slots:
             continue
         idx = state.get("adhan_idx", 0) % len(adhan_sets)
-        chunks = chunk_segments(adhan_sets[idx])
-        total = len(chunks) * SEG
+        achunks = chunk_segments(adhan_sets[idx])
+        if not achunks:
+            continue
+        schunks = chunk_segments(starters[prayer]) if prayer in starters else []
+        spre, total = len(schunks) * SEG, len(achunks) * SEG
         if start + total + 30 < now:
             done[key] = None
             changed = True
             continue
-        if any(gap(start, start + total, w["start"], w["end"]) <= MIN_GAP for w in wins):
+        if any(gap(start - spre, start + total, w["start"], w["end"]) <= MIN_GAP for w in wins):
             log(f"irish@{int(start)} within {MIN_GAP}s of a Cairo window — not splicing")
             done[key] = None
             changed = True
             continue
-        run = splice_slots(start - DELAY, start - DELAY + total, chunks, now)
-        if run:
-            done[key] = run
-            runs.append(run)
-            state["adhan_idx"] = (idx + 1) % len(adhan_sets)
-            changed = True
-            log(f"irish@{int(start)}: adhan-{idx} spliced into slots {run[0]}..{run[1]}")
+        anchor = grid_anchor(start - DELAY)
+        if anchor is None:
+            continue
+        adhan_slots = [(ts, n) for ts, n in slots if anchor <= ts < anchor + total]
+        if not adhan_slots:
+            continue
+        if schunks:
+            s_slots = [(ts, n) for ts, n in slots if anchor - spre <= ts < anchor]
+            if s_slots:
+                run, d = replace_slots(s_slots, schunks, now)
+                if run is None:
+                    continue
+                runs.append(run)
+                durs_all.update(d)
+                log(f"irish@{int(start)}: starter-{prayer} spliced into slots "
+                    f"{run[0]}..{run[1]}")
+        run, d = replace_slots(adhan_slots, achunks, now)
+        if run is None:
+            continue
+        runs.append(run)
+        durs_all.update(d)
+        done[key] = run
+        state["adhan_idx"] = (idx + 1) % len(adhan_sets)
+        changed = True
+        log(f"irish@{int(start)}: adhan-{idx} spliced into slots {run[0]}..{run[1]}")
 
     # --- Cairo Adhan suppression windows ---
     for w in wins:
@@ -180,26 +230,35 @@ def tick():
         key = f"cairo-{int(w['start'])}"
         if key in done:
             continue
-        if not filler_sets:
+        if not filler_sets or not slots:
             continue
         idx = state.get("filler_idx", 0) % len(filler_sets)
         chain = flatten(filler_sets, idx)
-        if any(gap(s, s + span_of(s), w["start"], w["end"]) <= MIN_GAP for s in events
-               if s - 86400 < w["end"]):
+        if any(gap(s, s + event_span(p), w["start"], w["end"]) <= MIN_GAP
+               for s, p in events):
             log(f"cairo@{int(w['start'])} within {MIN_GAP}s of an Irish adhan — not splicing")
             done[key] = None
             changed = True
             continue
-        run = splice_slots(w["start"] - DELAY, w["end"] - DELAY, chain, now)
-        if run:
-            done[key] = run
-            runs.append(run)
-            state["filler_idx"] = (idx + 1) % len(filler_sets)
-            changed = True
-            log(f"cairo@{int(w['start'])}: filler-{idx}+ spliced into slots {run[0]}..{run[1]}")
+        c_slots = [(ts, n) for ts, n in slots
+                   if w["start"] - DELAY - SEG < ts < w["end"] - DELAY]
+        run, d = replace_slots(c_slots, chain, now)
+        if run is None:
+            continue
+        runs.append(run)
+        durs_all.update(d)
+        done[key] = run
+        state["filler_idx"] = (idx + 1) % len(filler_sets)
+        changed = True
+        log(f"cairo@{int(w['start'])}: filler-{idx}+ spliced into slots {run[0]}..{run[1]}")
 
     # prune
     runs[:] = [r for r in runs if r[1] + DELAY + 3600 > now]
+    durs_all = state["durs"] = {
+        k: v for k, v in durs_all.items()
+        if any(a <= int(datetime.datetime.strptime(k, "%Y%m%d%H%M%S")
+                        .replace(tzinfo=UTC).timestamp()) <= b
+               for a, b in runs)}
     for k in list(done):
         try:
             if float(k.split("-", 1)[1]) < now - 2 * 86400:
@@ -211,14 +270,7 @@ def tick():
     if changed:
         save_json(STATE_FILE, state)
     save_json(RUNS_FILE, {"runs": runs})
-
-
-def flatten(sets, start_idx):
-    """Chain filler chunksets in order, starting at start_idx (round-robin)."""
-    out = []
-    for k in range(len(sets)):
-        out.extend(chunk_segments(sets[(start_idx + k) % len(sets)]))
-    return out
+    save_json(DURS_FILE, {"durs": durs_all})
 
 
 def main():
