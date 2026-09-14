@@ -1,23 +1,13 @@
 #!/usr/bin/env python3
-"""Event-aware delayed playlist builder.
+"""Delayed playlist builder — single continuous path.
 
-Replaces the old timeshift shell script. Rebuilds /live/delayed.m3u8 every
-few seconds. Normal mode serves archive segments from DELAY_SECONDS ago.
-Two event types override it:
-
-- Irish Adhan: at each time from /schedule/irish-times.txt, play one file
-  from /adhans (round-robin), then resume the delayed stream.
-- Cairo Adhan suppression: when the delayed stream would air the Adhan that
-  the Cairo station broadcasts at prayer times (AlAdhan API, method=5),
-  serve filler files from /fillers instead (whole files, one at a time,
-  round-robin per window); if there are no fillers, skip the Adhan content
-  and jump ahead.
-
-If an Irish Adhan and a Cairo window overlap or are within MIN_GAP seconds
-of each other, both are skipped and the normal delayed stream plays.
-
-Sequence numbers are derived from wall-clock time in "content space"
-(wall time minus DELAY) so they are stable per URI and monotonic.
+Rebuilds /live/delayed.m3u8 every few seconds from the recorded archive
+segments around (now - DELAY). All content changes (Irish Adhan inserts,
+Cairo Adhan suppression with fillers) are done by the SEPARATE splicer
+job (splice.py), which overwrites the archive segment *files* inside the
+delayed window before they air. This service only marks the spliced
+ranges with EXT-X-DISCONTINUITY so players flush cleanly at the audio
+change; the playlist itself is always one continuous archive sequence.
 """
 import os, re, time, json, glob, shutil, subprocess, urllib.request, datetime
 
@@ -325,35 +315,28 @@ def entries_ts(entry):
 
 # ---------------- emit ----------------
 
+RUNS_FILE = os.path.join(SCHED, ".splice-runs.json")
+
+def splice_runs():
+    """Active spliced content ranges [(t0, t1)] in content time, from the splicer."""
+    try:
+        return [tuple(r) for r in json.load(open(RUNS_FILE)).get("runs", [])]
+    except Exception:
+        return []
+
 def emit(seq, entries):
+    """entries: (dur, uri) pairs; (None, None) writes an EXT-X-DISCONTINUITY."""
     os.makedirs(LIVE, exist_ok=True)
     tmp = os.path.join(LIVE, ".delayed.m3u8.tmp")
     with open(tmp, "w") as f:
         f.write("#EXTM3U\n#EXT-X-VERSION:3\n")
         f.write(f"#EXT-X-TARGETDURATION:{SEG}\n#EXT-X-MEDIA-SEQUENCE:{seq}\n")
         for dur, uri in entries:
-            f.write(f"#EXTINF:{dur},\n{uri}\n")
+            if dur is None:
+                f.write("#EXT-X-DISCONTINUITY\n")
+            else:
+                f.write(f"#EXTINF:{dur},\n{uri}\n")
     os.replace(tmp, os.path.join(LIVE, "delayed.m3u8"))
-
-def sliding_emit(seq_base, chunksets, elapsed, window=4):
-    """Publish pre-chunked content as a live sliding window: only segments
-    that have started airing (plus a small tail) are listed, so players at
-    the live edge follow the content in real time instead of jumping to its
-    end. chunksets: ordered [(name, entries), ...] played back to back.
-    Returns True if the playlist was emitted."""
-    segs = []  # (index, start_offset, raw_dur, uri)
-    cum = 0.0
-    for name, entries in chunksets:
-        for d, u in entries:
-            segs.append((len(segs), cum, d, f"/live-static/{name}/{u}"))
-            cum += num(d, SEG)
-    if not segs:
-        return False
-    sel = [(j, d, u) for j, s, d, u in segs if s + num(d, SEG) > elapsed - window * SEG and s <= elapsed]
-    if not sel:
-        return False
-    emit(seq_base + sel[0][0] * SEG, [(d, u) for _, d, u in sel])
-    return True
 
 def emit_header_only():
     if not os.path.exists(os.path.join(LIVE, "delayed.m3u8")):
@@ -364,86 +347,28 @@ def emit_header_only():
 def tick():
     now = time.time()
     purge_old_state(now)
-    sets = ensure_chunksets()
-    adhan_sets = sets.get("adhan", [])
-    filler_sets = sets.get("filler", [])
+    ensure_chunksets()  # chunksets are the splicer's source material
 
-    wins = cairo_windows(now)
-    events = irish_events(now)
-
-    def adhan_idx_for(start, n):
-        eid = f"irish-{int(start)}"
-        if eid not in state:
-            state[eid] = state.get("adhan_idx", 0)
-            state["adhan_idx"] = (state.get("adhan_idx", 0) + 1) % n
-            save_state(state)
-        return state[eid] % n
-
-    def event_span(start):
-        if not adhan_sets:
-            return 0.0
-        return load_chunkset(adhan_sets[adhan_idx_for(start, len(adhan_sets))])[1]
-
-    def gap(a0, a1, b0, b1):
-        if a1 < b0:
-            return b0 - a1
-        if b1 < a0:
-            return a0 - b1
-        return 0  # overlap
-
-    def event_blocked(start):
-        end = start + event_span(start)
-        return any(gap(start, end, w["start"], w["end"]) <= MIN_GAP for w in wins)
-
-    def window_blocked(w):
-        return any(gap(s, s + event_span(s), w["start"], w["end"]) <= MIN_GAP
-                   for s in events)
-
-    # --- 1) Irish Adhan event? ---
-    for start in events:
-        if not (start <= now) or not adhan_sets or event_blocked(start):
-            continue
-        idx = adhan_idx_for(start, len(adhan_sets))
-        entries, total = load_chunkset(adhan_sets[idx])
-        if entries and now < start + total:
-            name = os.path.basename(adhan_sets[idx])
-            if sliding_emit(int(start) - DELAY, [(name, entries)], now - start):
-                return
-
-    # --- 2) Cairo Adhan suppression window? ---
-    for w in wins:
-        if not (w["start"] <= now <= w["end"]) or window_blocked(w):
-            continue
-        if filler_sets:
-            # whole filler files, one at a time, round-robin per window
-            wid = f"cairo-{int(w['start'])}"
-            if wid not in state:
-                state[wid] = state.get("filler_idx", 0)
-                state["filler_idx"] = (state.get("filler_idx", 0) + 1) % len(filler_sets)
-                save_state(state)
-            i = state[wid] % len(filler_sets)
-            ordered = []
-            for k in range(len(filler_sets)):
-                sdir = filler_sets[(i + k) % len(filler_sets)]
-                entries, _ = load_chunkset(sdir)
-                if entries:
-                    ordered.append((os.path.basename(sdir), entries))
-            if sliding_emit(int(w["start"]) - DELAY, ordered, now - w["start"]):
-                return
-        else:
-            # no fillers: skip the Adhan content entirely and jump ahead
-            eff_delay = now - (w["content_end"] + (now - w["start"]))
-            entries = delayed_entries(now - eff_delay)
-            if entries:
-                emit(int(entries_ts(entries[0])), entries)
-                return
-
-    # --- 3) normal delayed mode ---
+    # Single path: the delayed window is always archive segments; the
+    # splicer rewrites the segment *files* inside the window, so adhan /
+    # filler content simply plays through the continuous archive sequence.
     entries = delayed_entries(now - DELAY)
-    if entries:
-        emit(int(entries_ts(entries[0])), entries)
-    else:
+    if not entries:
         emit_header_only()
+        return
+    runs = splice_runs()
+    if runs:
+        items, prev = [], None
+        for e in entries:
+            ts = int(entries_ts(e))
+            sp = any(a <= ts <= b for a, b in runs)
+            if prev is not None and sp != prev:
+                items.append((None, None))
+            items.append(e)
+            prev = sp
+        emit(int(entries_ts(entries[0])), items)
+    else:
+        emit(int(entries_ts(entries[0])), entries)
 
 def main():
     log(f"starting: delay={DELAY}s seg={SEG}s")

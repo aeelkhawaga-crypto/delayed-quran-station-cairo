@@ -34,6 +34,23 @@ services:
         max-size: "5m"
         max-file: "2"
 
+  splicer:
+    build: ./scheduler
+    entrypoint: ["python3", "/splice.py"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: UTC
+    volumes:
+      - ./data/archive:/archive:rw
+      - ./data/static:/live-static:ro
+      - ./schedule:/schedule
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
   web:
     image: nginx:1.27-alpine
     restart: unless-stopped
