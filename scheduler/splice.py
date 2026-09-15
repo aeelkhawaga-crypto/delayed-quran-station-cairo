@@ -110,7 +110,10 @@ def _pts_list(path):
                             "-show_entries", "packet=pts", "-of", "csv=p=0", path],
                            capture_output=True, text=True, timeout=30)
         vals = []
-        for tok in r.stdout.split():
+        # ffprobe csv output can carry trailing commas on some lines; a strict
+        # int() per token would silently drop those packets (first and/or last),
+        # which corrupts both the alignment base and the offset math.
+        for tok in r.stdout.replace(",", " ").split():
             try:
                 vals.append(int(tok))
             except ValueError:
@@ -123,19 +126,33 @@ def _write_aligned(src, dst, start_pts):
     """Remux src so its first audio PTS == start_pts (90kHz ticks), keeping
     the delayed stream's timestamp continuity across spliced content.
     Players stall on mid-stream timestamp resets, so this matters more
-    than the audio payload itself."""
+    than the audio payload itself.
+
+    -output_ts_offset does not shift by the given value on all ffmpeg
+    builds (some rebase the output to zero first), so the offset is applied
+    and the result verified, correcting until the first PTS lands on
+    start_pts within half an AAC frame."""
     vals = _pts_list(src)
     if not vals:
         shutil.copyfile(src, dst)
         return
     off = (start_pts - vals[0]) / 90000.0
-    r = subprocess.run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-i", src, "-c", "copy",
-                        "-muxdelay", "0", "-muxpreload", "0",
-                        "-output_ts_offset", f"{off:.6f}", "-f", "mpegts", dst],
-                       capture_output=True, text=True, timeout=60)
-    if r.returncode != 0:
-        log(f"pts-align remux failed for {src}: {r.stderr.strip()[:150]} — plain copy")
-        shutil.copyfile(src, dst)
+    for _ in range(3):
+        r = subprocess.run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-i", src, "-c", "copy",
+                            "-muxdelay", "0", "-muxpreload", "0",
+                            "-output_ts_offset", f"{off:.6f}", "-f", "mpegts", dst],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            break
+        out = _pts_list(dst)
+        if not out:
+            break
+        residual = start_pts - out[0]
+        if abs(residual) <= FRAME_TICKS // 2:
+            return
+        off += residual / 90000.0
+    log(f"pts-align remux failed for {src}: {r.stderr.strip()[:150]} — plain copy")
+    shutil.copyfile(src, dst)
 
 def replace_slots(slots, chunks, now, prev_path):
     """Overwrite the given archive slots with chunk segments 1:1 in order,

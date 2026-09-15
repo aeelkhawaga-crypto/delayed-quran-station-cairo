@@ -50,8 +50,11 @@
     hls.attachMedia(audio);
     hls.on(Hls.Events.MANIFEST_PARSED, () => { btn.disabled = false; btn.textContent = '▶ Play'; });
     hls.on(Hls.Events.ERROR, (_, data) => {
-      if (data.fatal) {
-        setStatus('Connection issue — retrying…');
+      if (!data.fatal) return;
+      setStatus('Connection issue — retrying…');
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        hls.recoverMediaError();
+      } else {
         hls.startLoad();
       }
     });
