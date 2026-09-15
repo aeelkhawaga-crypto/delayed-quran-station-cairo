@@ -129,9 +129,9 @@ def _write_aligned(src, dst, start_pts):
         shutil.copyfile(src, dst)
         return
     off = (start_pts - vals[0]) / 90000.0
-    r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", src, "-c", "copy",
+    r = subprocess.run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-i", src, "-c", "copy",
                         "-muxdelay", "0", "-muxpreload", "0",
-                        "-output_ts_offset", f"{off:.6f}", dst],
+                        "-output_ts_offset", f"{off:.6f}", "-f", "mpegts", dst],
                        capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         log(f"pts-align remux failed for {src}: {r.stderr.strip()[:150]} — plain copy")

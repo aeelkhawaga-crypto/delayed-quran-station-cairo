@@ -267,7 +267,7 @@ def retimed_chunk(f, sdir):
     # trim a hair short: the AAC priming frame (~23ms) would otherwise spill
     # past the target and the muxer emits a tiny tail segment
     filters.append(f"apad,atrim=0:{target - 0.06:.3f}")
-    return subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", f,
+    return subprocess.run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-i", f,
                            "-vn", "-af", ",".join(filters),
                            "-c:a", "aac", "-b:a", "96k", "-ac", "2", "-ar", "44100",
                            "-f", "hls", "-hls_time", str(SEG),
