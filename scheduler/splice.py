@@ -237,6 +237,7 @@ def tick():
         schunks = chunk_segments(starters[prayer]) if prayer in starters else []
         spre, total = len(schunks) * SEG, len(achunks) * SEG
         if start + total + 30 < now:
+            log(f"irish@{int(start)}: event past before splice — marked done (total={total})")
             done[key] = None
             changed = True
             continue
