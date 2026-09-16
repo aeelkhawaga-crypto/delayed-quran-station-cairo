@@ -207,6 +207,9 @@ def flatten(sets, start_idx):
 
 def tick():
     now = time.time()
+    cfg = sch.get_config()
+    DELAY = cfg["delay"]          # live overrides (admin-config.json)
+    MIN_GAP = cfg["min_gap"]
     adhan_sets = chunkset_dirs("adhan")
     filler_sets = chunkset_dirs("filler")
     starters = starter_dirs()

@@ -37,6 +37,55 @@ PRAYERS = ("Fajr", "Dhuhr", "Asr", "Maghrib", "Isha")
 CAIRO_LAT, CAIRO_LON = 30.0444, 31.2357
 AUDIO_EXT = (".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac")
 
+# ---------------- live station config ----------------
+# schedule/admin-config.json (written by the admin API) overrides the env
+# defaults below. Re-read every tick via get_config(), so changes apply
+# within seconds without recreating the container.
+
+CONFIG_FILE = os.path.join(SCHED, "admin-config.json")
+_cfg_cache = {"mtime": -1, "data": {}}
+
+def get_config():
+    """Live config dict: admin-config.json values win, env is the fallback.
+    delay/win_pre/win_post/min_gap are ints; method a str; cairo_enabled bool.
+    delay is bounded so the delayed window never outruns the archive."""
+    try:
+        mtime = os.path.getmtime(CONFIG_FILE)
+    except OSError:
+        mtime = None
+    if mtime != _cfg_cache["mtime"]:
+        data = {}
+        if mtime is not None:
+            try:
+                with open(CONFIG_FILE) as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    data = {}
+            except Exception as e:
+                log(f"admin-config.json unreadable, using env: {e}")
+        _cfg_cache.update(mtime=mtime, data=data)
+    d = _cfg_cache["data"]
+    archive_max = int(os.environ.get("ARCHIVE_HOURS", "4")) * 3600 - 600
+
+    def bounded(key, env, lo, hi):
+        v = d.get(key)
+        if v is None:
+            return env
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return env
+        return max(lo, min(hi, v))
+
+    return {
+        "delay": bounded("delay_seconds", DELAY, SEG, archive_max),
+        "win_pre": bounded("window_pre_seconds", WIN_PRE, 0, 3600),
+        "win_post": bounded("window_post_seconds", WIN_POST, 0, 7200),
+        "min_gap": bounded("min_gap_seconds", MIN_GAP, 0, 3600),
+        "method": str(d.get("method", METHOD)),
+        "cairo_enabled": bool(d.get("cairo_enabled", True)),
+    }
+
 
 def log(msg):
     print(f"[scheduler] {msg}", flush=True)
@@ -220,6 +269,9 @@ def cairo_prayers(day):
 
 def cairo_windows(now):
     """Suppression windows in served wall-time (UTC epochs)."""
+    cfg = get_config()
+    if not cfg["cairo_enabled"]:
+        return []
     day = datetime.datetime.fromtimestamp(now, UTC).date()
     wins = []
     for d in (day, day + datetime.timedelta(days=1)):
@@ -227,11 +279,11 @@ def cairo_windows(now):
         if not pr:
             continue
         for p, pt in pr.items():
-            start = pt + DELAY - WIN_PRE
-            end = pt + DELAY + WIN_POST
+            start = pt + cfg["delay"] - cfg["win_pre"]
+            end = pt + cfg["delay"] + cfg["win_post"]
             if end > now - 3600:
                 wins.append({"name": p, "start": start, "end": end,
-                             "content_end": pt + WIN_POST})
+                             "content_end": pt + cfg["win_post"]})
     return wins
 
 # ---------------- chunksets (adhan / filler / starter) ----------------
@@ -445,7 +497,7 @@ def tick():
     # No EXT-X-DISCONTINUITY: audio-only players (hls.js especially) are
     # prone to stalling on discontinuities; codec params are identical
     # across spliced/recorder segments, so a plain content change is safe.
-    entries = delayed_entries(now - DELAY)
+    entries = delayed_entries(now - get_config()["delay"])
     if not entries:
         emit_header_only()
         return
@@ -458,6 +510,11 @@ def tick():
 
 def main():
     log(f"starting: delay={DELAY}s seg={SEG}s")
+    try:
+        import admin
+        admin.start_admin_thread()
+    except Exception as e:
+        log(f"admin API failed to start: {e}")
     while True:
         try:
             tick()

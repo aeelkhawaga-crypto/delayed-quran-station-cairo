@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quran Radio — Admin</title>
+<style>
+  :root {
+    --bg: #0d1b2a; --panel: #14263c; --line: #22354e; --text: #e0e1dd;
+    --dim: #778da9; --accent: #1b6ca8; --ok: #43aa5c; --bad: #d1495b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font-family: system-ui, -apple-system, sans-serif; }
+  header { display: flex; align-items: center; gap: 1rem; padding: .8rem 1.2rem;
+           background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 1.1rem; margin: 0; font-weight: 600; }
+  header .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); }
+  header .dot.ok { background: var(--ok); }
+  header .who { margin-left: auto; color: var(--dim); font-size: .85rem; }
+  header button { background: none; border: 1px solid var(--line); color: var(--dim);
+                  border-radius: 6px; padding: .3rem .8rem; cursor: pointer; }
+  main { max-width: 60rem; margin: 0 auto; padding: 1.2rem; display: grid;
+         grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1rem; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          padding: 1rem 1.1rem; }
+  .card h2 { margin: 0 0 .8rem; font-size: .95rem; color: var(--dim);
+             text-transform: uppercase; letter-spacing: .05em; }
+  .clocks { display: flex; justify-content: space-between; }
+  .clocks div { text-align: center; }
+  .clocks .t { font-size: 1.5rem; font-variant-numeric: tabular-nums; }
+  .clocks .l { color: var(--dim); font-size: .8rem; }
+  .next { margin-top: .9rem; text-align: center; color: var(--dim); font-size: .9rem; }
+  .next b { color: var(--text); }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  td { padding: .3rem 0; border-bottom: 1px solid var(--line); }
+  td:last-child { text-align: right; font-variant-numeric: tabular-nums; color: var(--dim); }
+  tr.next-prayer td { color: var(--text); font-weight: 600; }
+  .delay-val { font-size: 1.9rem; font-variant-numeric: tabular-nums; }
+  .delay-sub { color: var(--dim); font-size: .8rem; margin-bottom: .8rem; }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  button.act { background: var(--accent); border: none; color: #fff; border-radius: 6px;
+               padding: .45rem .9rem; cursor: pointer; font-size: .9rem; }
+  button.mini { background: #1d3450; border: 1px solid var(--line); color: var(--text);
+                border-radius: 6px; padding: .35rem .6rem; cursor: pointer; }
+  input { background: #0f2033; border: 1px solid var(--line); color: var(--text);
+          border-radius: 6px; padding: .4rem .5rem; width: 6rem; }
+  .note { color: var(--dim); font-size: .78rem; margin-top: .6rem; line-height: 1.4; }
+  .msg { margin-top: .6rem; font-size: .85rem; min-height: 1.2em; }
+  .msg.err { color: var(--bad); }
+  .msg.ok { color: var(--ok); }
+  ul.runs { margin: 0; padding-left: 1.1rem; font-size: .85rem; color: var(--dim); }
+  ul.runs li { margin: .25rem 0; font-variant-numeric: tabular-nums; }
+  .empty { color: var(--dim); font-size: .85rem; }
+  /* login */
+  #login { max-width: 20rem; margin: 12vh auto; background: var(--panel);
+           border: 1px solid var(--line); border-radius: 12px; padding: 2rem; }
+  #login h1 { font-size: 1.2rem; margin: 0 0 1.2rem; text-align: center; }
+  #login input { width: 100%; margin-bottom: .8rem; padding: .6rem .7rem; }
+  #login button { width: 100%; padding: .7rem; font-size: 1rem; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<form id="login" hidden>
+  <h1>Quran Radio — Admin</h1>
+  <input id="user" autocomplete="username" placeholder="Username" required>
+  <input id="pass" type="password" autocomplete="current-password" placeholder="Password" required>
+  <button class="act" type="submit">Sign in</button>
+  <div class="msg err" id="login-msg"></div>
+</form>
+
+<div id="app" hidden>
+  <header>
+    <span class="dot" id="health-dot" title="recorder health"></span>
+    <h1>Quran Radio — Admin</h1>
+    <span class="who" id="who"></span>
+    <button id="logout" type="button">Sign out</button>
+  </header>
+  <main>
+    <section class="card">
+      <h2>Clocks</h2>
+      <div class="clocks">
+        <div><div class="t" id="clock-dublin">—</div><div class="l">Dublin</div></div>
+        <div><div class="t" id="clock-cairo">—</div><div class="l">Cairo</div></div>
+        <div><div class="t" id="clock-utc">—</div><div class="l">UTC</div></div>
+      </div>
+      <div class="next" id="next-prayer"></div>
+    </section>
+
+    <section class="card">
+      <h2>Broadcast delay</h2>
+      <div class="delay-val" id="delay-val">—</div>
+      <div class="delay-sub" id="delay-sub"></div>
+      <div class="row">
+        <button class="mini" data-delta="-3600">−1h</button>
+        <button class="mini" data-delta="-1800">−30m</button>
+        <button class="mini" data-delta="1800">+30m</button>
+        <button class="mini" data-delta="3600">+1h</button>
+        <input id="delay-input" type="number" min="0" step="30" title="minutes">
+        <button class="act" id="delay-save" type="button">Save</button>
+      </div>
+      <div class="msg" id="delay-msg"></div>
+      <div class="note">Applies within seconds — no restart. The stream jumps by
+        the difference, so listeners briefly re-sync. The archive keeps
+        <span id="delay-max"></span>, which bounds how large the delay can be.</div>
+    </section>
+
+    <section class="card">
+      <h2>Dublin prayer times</h2>
+      <table id="tbl-dublin"><tbody></tbody></table>
+      <div class="note">Islamic Foundation of Ireland timetable.</div>
+    </section>
+
+    <section class="card">
+      <h2>Cairo prayer times</h2>
+      <table id="tbl-cairo"><tbody></table>
+      <div class="note">AlAdhan API (method <span id="method"></span>) — the
+        delayed stream hides the adhan inside ±<span id="margins"></span>
+        of each Cairo prayer.</div>
+    </section>
+
+    <section class="card">
+      <h2>Recent activity</h2>
+      <ul class="runs" id="runs"></ul>
+    </section>
+  </main>
+</div>
+
+<script src="admin.js"></script>
+</body>
+</html>

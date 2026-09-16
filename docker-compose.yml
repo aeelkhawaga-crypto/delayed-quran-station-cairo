@@ -25,9 +25,10 @@ services:
       - ./data/archive:/archive:ro
       - ./data/live:/live
       - ./data/static:/live-static
-      - ./adhans:/adhans:ro
-      - ./fillers:/fillers:ro
-      - ./adhan-prefixes:/starters:ro
+      - ./adhans:/adhans:rw
+      - ./fillers:/fillers:rw
+      - ./adhan-prefixes:/starters:rw
+      - ./library:/library:rw
       - ./schedule:/schedule
     logging:
       driver: json-file
