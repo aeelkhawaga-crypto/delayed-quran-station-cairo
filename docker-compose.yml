@@ -26,6 +26,7 @@ services:
       - ./data/live:/live
       - ./data/static:/live-static
       - ./adhans:/adhans:ro
+      - ./adhans-fajr:/adhans-fajr:ro
       - ./fillers:/fillers:ro
       - ./adhan-prefixes:/starters:ro
       - ./schedule:/schedule
