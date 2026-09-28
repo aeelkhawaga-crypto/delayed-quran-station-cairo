@@ -223,6 +223,7 @@ def flatten(sets, start_idx):
 # slots at least that old are ever filled.
 
 HEAL_MIN_AGE = 120.0
+FILL_MAX = 12   # max slots healed per tick (bounds CPU after a long outage)
 
 
 def dir_slots():
@@ -288,6 +289,7 @@ def heal_archive_gaps(now):
             g += SEG
     if not missing:
         return
+    missing = missing[:FILL_MAX]   # pace catch-up; the rest lands next ticks
     pool = fill_pool()
     if not pool:
         if now - state.get("heal_warned", 0) > 600:

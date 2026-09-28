@@ -364,15 +364,7 @@ def load_chunkset(sdir):
 
 # ---------------- archive (delayed mode) ----------------
 
-CURSOR_FILE = os.path.join(SCHED, ".delayed-cursor.json")
-PLAYLIST_MAX = 8   # cap emitted segments per playlist (catch-up after a pause)
-
-
-def save_json(path, obj):
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(obj, f)
-    os.replace(tmp, path)
+PLAYLIST_MAX = 8   # segments per emitted playlist (~80s of buffer)
 
 
 def archive_names():
@@ -413,33 +405,17 @@ def index_durations():
 
 
 def delayed_entries(target_ts):
-    """Cursor-based pick of archive segments up to target_ts: [(ts, name)].
+    """Sliding window over archive names: the last PLAYLIST_MAX segments
+    with name-ts <= target_ts, oldest first.
 
-    The cursor advances over filename timestamps, so upstream bursts (names
-    4s apart) or stalls (names >10s apart, healed later by the gap filler)
-    can never shrink the playlist to nothing — the failure mode that froze
-    the delayed stream. Returns [] when nothing new exists yet; the caller
-    then keeps serving the previous playlist unchanged."""
-    names = archive_names()
-    if not names:
-        return []
-    cursor = None
-    try:
-        cursor = json.load(open(CURSOR_FILE)).get("ts")
-    except Exception:
-        pass
-    if cursor is None:
-        below = [t for t, _ in names if t <= target_ts - 3 * SEG]
-        cursor = below[-1] if below else names[0][0] - SEG
-    fresh = [(t, n) for t, n in names if cursor < t <= target_ts]
-    if not fresh:
-        return []
-    fresh = fresh[-PLAYLIST_MAX:]
-    try:
-        save_json(CURSOR_FILE, {"ts": fresh[-1][0]})
-    except Exception as e:
-        log(f"cursor save failed: {e}")
-    return fresh
+    The window's front edge anchors on the newest AVAILABLE name, not on
+    target_ts, and reaches back PLAYLIST_MAX segments — so sparse names
+    (upstream bursts/stalls, healed fills) shrink the playlist only when
+    fewer than PLAYLIST_MAX segments exist at all, never to one fresh
+    segment per tick. Returns [(ts, name)] (may be shorter than
+    PLAYLIST_MAX near the start of an archive)."""
+    avail = [(t, n) for t, n in archive_names() if t <= target_ts]
+    return avail[-PLAYLIST_MAX:]
 
 def entries_ts(entry):
     m = re.search(r"(\d{14})", entry[1])
@@ -480,6 +456,7 @@ def emit_header_only():
 # ---------------- main loop ----------------
 
 DURS_FILE = os.path.join(SCHED, ".splice-durs.json")
+_emitted_key = {"k": None}   # (first_ts, last_ts) of the last emitted playlist
 
 def splice_durs():
     """True durations {segment_name: dur} for spliced slots, from the splicer."""
@@ -502,8 +479,12 @@ def tick():
     # across spliced/recorder segments, so a plain content change is safe.
     entries = delayed_entries(now - DELAY)
     if not entries:
-        emit_header_only()   # nothing new: keep serving the previous playlist
+        emit_header_only()   # nothing available yet: keep previous playlist
         return
+    key = (entries[0][0], entries[-1][0])
+    if key == _emitted_key.get("k"):   # unchanged window: don't rewrite
+        return
+    _emitted_key["k"] = key
     durs = splice_durs()
     idurs = index_durations()
     items = [(durs.get(n, idurs.get(n, f"{SEG}.000000")), f"/archive/{n}")
