@@ -144,7 +144,9 @@ function toast(msg) {
 function setup() {
   if (useHls) {
     if (hls) hls.destroy();
-    hls = new Hls({ liveSyncDurationCount: 3 });
+    // play at the broadcast point, which the server places 150 s before the
+    // playlist end (EXT-X-START); the rest is buffer
+    hls = new Hls({ liveSyncDuration: 150, liveMaxLatencyDuration: 400, maxBufferLength: 120 });
     hls.loadSource(playlist);
     hls.attachMedia(audio);
     hls.on(Hls.Events.MANIFEST_PARSED, ready);

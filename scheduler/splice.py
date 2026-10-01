@@ -29,12 +29,13 @@ through the filenames and hear the inserted content where it belongs.
   chunksets — or silence if no fillers exist — PTS-chained to neighbours,
   so the delayed playlist never runs dry (see heal_archive_gaps).
 
-A slot is fetched by players only during the ~30s before it airs, so the
-splice happens LEAD seconds before the event; that way no player holds
-the old bytes for a spliced slot. Chunksets are pre-retimed to whole
-10s slots by the scheduler, so every replaced slot carries exactly one
-full segment; the true durations are handed to the scheduler via
-.splice-durs.json so the playlist timeline stays exact.
+The playlist reaches PLAYLIST_AHEAD (150 s) past the broadcast point, so a
+slot can be fetched up to that long before it airs; splicing happens LEAD
+(SPLICE_LEAD, 10 min) before the event, well before any player can hold
+the old bytes. Chunksets are pre-retimed to whole 10s slots by the
+scheduler, so every replaced slot carries exactly one full segment; the
+true durations are handed to the scheduler via .splice-durs.json so the
+playlist timeline stays exact.
 """
 import os, re, sys, json, glob, time, datetime, subprocess, shutil
 
@@ -48,7 +49,8 @@ ARCHIVE = sch.ARCHIVE
 STATIC = sch.STATIC
 UTC = sch.UTC
 
-LEAD = 60.0        # splice this long before the first slot starts airing
+LEAD = sch.SPLICE_LEAD   # splice this long before the first slot airs (players
+                         # fetch up to PLAYLIST_AHEAD s ahead, so LEAD must exceed it)
 EXPOSURE = 3 * SEG  # a slot keeps being fetched this long after it starts
 LOOP = 5.0
 
@@ -212,7 +214,7 @@ def flatten(sets, start_idx):
 # The delayed playlist would freeze on such a hole, so this healer
 # synthesizes filler segments there (filler audio if available, silence
 # otherwise). Rules that keep it from fighting the rest of the system:
-# - only slots that have not aired yet (newer than now - DELAY + LEAD) are
+# - only slots players cannot have fetched yet (beyond the playlist end) are
 #   filled; older holes are history, and refilling them is what kept
 #   resurrecting deleted segments in a loop;
 # - a fill never overlaps the next real segment (g + SEG <= next name);
@@ -277,7 +279,7 @@ def heal_archive_gaps(now):
         return
     have = {t for t, _ in slots}
     limit = now - HEAL_MIN_AGE
-    floor = now - DELAY + LEAD          # slots before this have (nearly) aired
+    floor = now - DELAY + sch.PLAYLIST_AHEAD + 2 * SEG   # players may already hold these
     missing = []
     prev = None
     for ts, _ in slots:

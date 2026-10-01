@@ -422,7 +422,14 @@ def load_chunkset(sdir):
 
 # ---------------- archive (delayed mode) ----------------
 
-PLAYLIST_MAX = 8   # segments per emitted playlist (~80s of buffer)
+# The playlist reaches PLAYLIST_AHEAD seconds past the broadcast point (all
+# of it is already recorded) and EXT-X-START tells players to begin exactly
+# at the broadcast point: listeners get a multi-minute buffer instead of
+# ~30 s, and hear the stream on Irish time instead of ~30 s late. Splices
+# must therefore land well before players can fetch a slot: SPLICE_LEAD.
+PLAYLIST_AHEAD = int(os.environ.get("PLAYLIST_AHEAD_SECONDS", "150"))
+SPLICE_LEAD = float(os.environ.get("SPLICE_LEAD_SECONDS", "600"))
+PLAYLIST_MAX = (PLAYLIST_AHEAD + 60) // SEG + 1   # + ~1 min behind the broadcast point
 
 
 def archive_names():
@@ -493,13 +500,15 @@ def splice_runs():
     except Exception:
         return []
 
-def emit(seq, entries):
+def emit(seq, entries, start_offset=None):
     """entries: (dur, uri) pairs; (None, None) writes an EXT-X-DISCONTINUITY."""
     os.makedirs(LIVE, exist_ok=True)
     tmp = os.path.join(LIVE, ".delayed.m3u8.tmp")
     with open(tmp, "w") as f:
         f.write("#EXTM3U\n#EXT-X-VERSION:3\n")
         f.write(f"#EXT-X-TARGETDURATION:{SEG}\n#EXT-X-MEDIA-SEQUENCE:{seq}\n")
+        if start_offset:
+            f.write(f"#EXT-X-START:TIME-OFFSET=-{start_offset}\n")
         for dur, uri in entries:
             if dur is None:
                 f.write("#EXT-X-DISCONTINUITY\n")
@@ -579,7 +588,7 @@ def tick():
     # No EXT-X-DISCONTINUITY: audio-only players (hls.js especially) are
     # prone to stalling on discontinuities; codec params are identical
     # across spliced/recorder segments, so a plain content change is safe.
-    entries = delayed_entries(now - DELAY)
+    entries = delayed_entries(now - DELAY + PLAYLIST_AHEAD)
     if not entries:
         emit_header_only()   # nothing available yet: keep previous playlist
         return
@@ -591,7 +600,10 @@ def tick():
     idurs = index_durations()
     items = [(durs.get(n, idurs.get(n, f"{SEG}.000000")), f"/archive/{n}")
              for _, n in entries]
-    emit(media_sequence([n for _, n in entries]), items)
+    # players start this far before the playlist end = the broadcast point
+    end = entries[-1][0] + float(items[-1][0])
+    offset = max(SEG, round(end - (now - DELAY)))
+    emit(media_sequence([n for _, n in entries]), items, offset)
 
 def main():
     log(f"starting: delay={DELAY}s seg={SEG}s")
