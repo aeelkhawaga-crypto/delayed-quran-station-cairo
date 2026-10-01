@@ -2,8 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Quran Radio — Live for Ireland</title>
+<meta name="description" content="Cairo Quran Radio, live on Irish time, with the adhan at Irish prayer times.">
+<meta name="theme-color" content="#0d1b2a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Quran Radio">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <!-- Google tag (gtag.js) -->
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-GMXJQKFDDW"></script>
 <script>
@@ -15,105 +24,312 @@
 </script>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <style>
+  :root { --bg:#0d1b2a; --card:#132639; --line:#1f3a56; --text:#e0e1dd; --dim:#8aa0b8;
+          --accent:#1b6ca8; --gold:#f2c14e; }
+  * { box-sizing:border-box; }
   body {
-    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
-    background: #0d1b2a; color: #e0e1dd; font-family: system-ui, -apple-system, sans-serif;
+    margin:0; min-height:100vh; background:var(--bg); color:var(--text);
+    font-family:system-ui, -apple-system, sans-serif;
+    padding:env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
+    overflow-x:hidden;
   }
-  main { text-align: center; padding: 2rem; max-width: 34rem; }
-  h1 { font-weight: 600; font-size: 1.6rem; margin-bottom: .25rem; }
-  .sub { color: #778da9; margin-bottom: 2rem; }
-  button {
-    font-size: 1.1rem; padding: .9rem 2.4rem; border: none; border-radius: 999px;
-    background: #1b6ca8; color: #fff; cursor: pointer;
+  main { max-width:30rem; margin:0 auto; text-align:center; padding:2rem 0 1.5rem; }
+  .logo { width:64px; height:64px; border-radius:16px; }
+  h1 { font-weight:600; font-size:1.5rem; margin:.6rem 0 .25rem; }
+  .sub { color:var(--dim); margin:0 0 1.6rem; font-size:.95rem; }
+  #play {
+    font-size:1.15rem; padding:1rem 2.6rem; border:none; border-radius:999px;
+    background:var(--accent); color:#fff; cursor:pointer; min-width:12rem;
   }
-  button:disabled { background: #415a77; cursor: default; }
-  #status { margin-top: 1.2rem; min-height: 1.4em; color: #a8c0d8; }
-  #clock { font-variant-numeric: tabular-nums; font-size: 2.2rem; margin-top: 1.6rem; }
-  #clockLabel { color: #778da9; font-size: .85rem; }
-  .direct { margin-top: 2rem; font-size: .8rem; color: #778da9; word-break: break-all; }
+  #play:disabled { background:#415a77; cursor:default; }
+  #status { margin-top:.9rem; min-height:1.4em; color:#a8c0d8; font-size:.95rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px;
+          padding:1rem; margin-top:1.4rem; text-align:left; }
+  .row { display:flex; justify-content:space-between; align-items:baseline; gap:.5rem; }
+  .label { color:var(--dim); font-size:.8rem; text-transform:uppercase; letter-spacing:.05em; }
+  #clock { font-variant-numeric:tabular-nums; font-size:1.6rem; }
+  #next-name { font-size:1.35rem; font-weight:600; }
+  #next-in { font-variant-numeric:tabular-nums; color:var(--gold); font-size:1.1rem; }
+  #next-note { color:var(--dim); font-size:.85rem; margin-top:.3rem; }
+  .times { display:flex; gap:.35rem; margin-top:.8rem; flex-wrap:wrap; }
+  .times span { flex:1; min-width:3.6rem; text-align:center; background:#0f2031; border-radius:8px;
+                padding:.35rem .2rem; font-size:.8rem; color:var(--dim); }
+  .times span b { display:block; color:var(--text); font-size:.95rem; font-weight:500;
+                  font-variant-numeric:tabular-nums; }
+  .times span.past { opacity:.45; }
+  .times span.next { outline:1px solid var(--gold); color:var(--gold); }
+  .tools { display:flex; gap:.6rem; margin-top:1rem; }
+  .tools > * { flex:1; min-width:0; }
+  select, .btn {
+    width:100%; background:#0f2031; color:var(--text); border:1px solid var(--line);
+    border-radius:10px; padding:.65rem .6rem; font-size:.95rem; cursor:pointer;
+    -webkit-appearance:none; appearance:none; text-align:center; font-family:inherit;
+  }
+  #sleep-left { color:var(--gold); font-size:.85rem; min-height:1.2em; margin-top:.5rem; text-align:center; }
+  footer { margin-top:2rem; color:var(--dim); font-size:.78rem; line-height:1.5; }
+  footer details { margin-top:.6rem; }
+  footer summary { cursor:pointer; }
+  #url { word-break:break-all; display:block; margin:.4rem 0; color:#a8c0d8; }
+  #toast { position:fixed; left:50%; bottom:calc(20px + env(safe-area-inset-bottom));
+           transform:translateX(-50%); background:#000d; color:#fff; padding:.5rem .9rem;
+           border-radius:8px; font-size:.85rem; display:none; }
 </style>
 </head>
 <body>
 <main>
+  <img class="logo" src="/icon-192.png" alt="">
   <h1>Quran Radio &mdash; Live</h1>
-  <p class="sub">Broadcast from Cairo, time-shifted 2 hours to match Irish local time.</p>
+  <p class="sub">Cairo's Quran station, shifted to Irish time &mdash; with the adhan at Irish prayer times.</p>
+
   <button id="play" disabled>Loading&hellip;</button>
   <div id="status"></div>
-  <div id="clock"></div>
-  <div id="clockLabel">Time in Ireland</div>
-  <p class="direct">Listen in an external player (VLC, etc.):<br><span id="url"></span></p>
+
+  <section class="card" id="prayer-card" hidden>
+    <div class="row"><span class="label">Next prayer · Dublin</span><span class="label" id="clock-wrap">now <span id="clock"></span></span></div>
+    <div class="row" style="margin-top:.35rem"><span id="next-name">—</span><span id="next-in"></span></div>
+    <div id="next-note"></div>
+    <div class="times" id="times"></div>
+  </section>
+
+  <div class="tools">
+    <select id="sleep" aria-label="Sleep timer">
+      <option value="0">☾ Sleep timer: off</option>
+      <option value="15">☾ Stop in 15 min</option>
+      <option value="30">☾ Stop in 30 min</option>
+      <option value="45">☾ Stop in 45 min</option>
+      <option value="60">☾ Stop in 1 hour</option>
+      <option value="90">☾ Stop in 1½ hours</option>
+    </select>
+    <button class="btn" id="share">↗ Share</button>
+  </div>
+  <div id="sleep-left"></div>
+
+  <footer>
+    <div id="install-hint"></div>
+    <details>
+      <summary>Listen in another app (VLC, etc.)</summary>
+      <span id="url"></span>
+      <button class="btn" id="copy-url" style="width:auto; padding:.35rem .8rem">Copy link</button>
+    </details>
+    <div style="margin-top:.6rem">Irish prayer times: Islamic Foundation of Ireland timetable.</div>
+  </footer>
 </main>
+<div id="toast"></div>
 <script>
-  const playlist = location.origin + '/live/delayed.m3u8';
-  document.getElementById('url').textContent = playlist;
+"use strict";
+const $ = id => document.getElementById(id);
+const playlist = location.origin + '/live/delayed.m3u8';
+$('url').textContent = playlist;
 
-  const btn = document.getElementById('play');
-  const status = document.getElementById('status');
-  let audio = new Audio();
+const btn = $('play');
+const audio = new Audio();
+audio.preload = 'none';
+let hls = null;
+let wantPlaying = false;       // the listener asked for audio
+let selfPause = false;         // a pause we caused (vs. lock screen / phone call)
 
-  function setStatus(msg) { status.textContent = msg; }
+const track = (name, params) => { try { gtag('event', name, params || {}); } catch (e) {} };
+const useHls = !!(window.Hls && Hls.isSupported());
+const player = useHls ? 'hls.js' : 'native';
+const setStatus = msg => { $('status').textContent = msg; };
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toast._t); toast._t = setTimeout(() => { t.style.display = 'none'; }, 2500);
+}
 
-  // Analytics events: listening time and stream health, not just page views
-  const track = (name, params) => { try { gtag('event', name, params || {}); } catch (e) {} };
-  const player = Hls.isSupported() ? 'hls.js' : 'native';
-  let listenTimer = null, lastProblem = 0;
-  function problem(kind) {
-    if (Date.now() - lastProblem < 60000) return;     // at most one per minute
-    lastProblem = Date.now();
-    track('stream_problem', { kind, player });
-  }
-  audio.addEventListener('playing', () => {
-    if (!listenTimer) listenTimer = setInterval(() => track('listening', { minutes: 5, player }), 300000);
-  });
-  audio.addEventListener('pause', () => { clearInterval(listenTimer); listenTimer = null; });
-  audio.addEventListener('stalled', () => problem('stalled'));
-  audio.addEventListener('waiting', () => { if (!audio.paused) problem('buffering'); });
-  audio.addEventListener('error', () => problem('media_error'));
+/* ---------------- player ---------------- */
 
-  if (Hls.isSupported()) {
-    const hls = new Hls({ liveSyncDurationCount: 3 });
+function setup() {
+  if (useHls) {
+    if (hls) hls.destroy();
+    hls = new Hls({ liveSyncDurationCount: 3 });
     hls.loadSource(playlist);
     hls.attachMedia(audio);
-    hls.on(Hls.Events.MANIFEST_PARSED, () => { btn.disabled = false; btn.textContent = '▶ Play'; });
+    hls.on(Hls.Events.MANIFEST_PARSED, ready);
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (!data.fatal) return;
       problem('hls_' + data.type);
-      setStatus('Connection issue — retrying…');
-      if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-        hls.recoverMediaError();
-      } else {
-        hls.startLoad();
-      }
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+      else hls.startLoad();
     });
-    window._hls = hls;
   } else if (audio.canPlayType('application/vnd.apple.mpegurl')) {
-    audio.src = playlist;
-    btn.disabled = false;
-    btn.textContent = '▶ Play';
+    audio.src = playlist + '?t=' + Date.now();
+    ready();
   } else {
-    setStatus('Your browser does not support HLS playback.');
+    setStatus('Your browser cannot play this stream — use the link below in VLC.');
   }
+}
+function ready() {
+  btn.disabled = false;
+  if (!wantPlaying) btn.textContent = '▶ Play';
+}
 
-  btn.addEventListener('click', () => {
-    if (audio.paused) {
-      audio.play();
-      track('play', { player });
-      btn.textContent = '❚❚ Pause';
-      setStatus('Listening — this stream is 2 hours behind Cairo.');
-    } else {
-      audio.pause();
-      track('pause', { player });
-      btn.textContent = '▶ Play';
-      setStatus('');
-    }
-  });
+function start() {
+  wantPlaying = true;
+  audio.play().catch(() => setStatus('Tap play again to start.'));
+  btn.textContent = '❚❚ Pause';
+  setStatus('Connecting…');
+  track('play', { player });
+}
+function stop(reason) {
+  wantPlaying = false;
+  selfPause = true;
+  audio.pause();
+  btn.textContent = '▶ Play';
+  setStatus(reason || '');
+  track('pause', { player, reason: reason ? 'sleep_timer' : 'user' });
+}
+btn.addEventListener('click', () => (wantPlaying ? stop() : start()));
 
-  const fmt = new Intl.DateTimeFormat('en-IE', {
-    timeZone: 'Europe/Dublin', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
-  });
-  function tick() { document.getElementById('clock').textContent = fmt.format(new Date()); }
-  tick();
-  setInterval(tick, 1000);
+audio.addEventListener('playing', () => {
+  setStatus('Live — on Irish time');
+  if (!listenTimer) listenTimer = setInterval(() => track('listening', { minutes: 5, player }), 300000);
+});
+audio.addEventListener('pause', () => {
+  clearInterval(listenTimer); listenTimer = null;
+  if (selfPause) { selfPause = false; return; }
+  // paused by the system (lock screen, call, headphones out): respect it
+  if (wantPlaying && !recovering) {
+    wantPlaying = false;
+    btn.textContent = '▶ Play';
+    setStatus('Paused');
+  }
+});
+let listenTimer = null;
+
+/* ---- automatic recovery: audio should play but time stopped moving ---- */
+let lastT = 0, stuckSince = null, recovering = false, lastProblem = 0;
+function problem(kind) {
+  if (Date.now() - lastProblem < 60000) return;
+  lastProblem = Date.now();
+  track('stream_problem', { kind, player });
+}
+audio.addEventListener('stalled', () => problem('stalled'));
+audio.addEventListener('waiting', () => { if (wantPlaying) problem('buffering'); });
+audio.addEventListener('error', () => { problem('media_error'); if (wantPlaying) recover('error'); });
+audio.addEventListener('ended', () => { if (wantPlaying) recover('ended'); });
+
+function recover(reason) {
+  if (recovering) return;
+  recovering = true;
+  setStatus('Reconnecting…');
+  track('stream_recover', { reason, player });
+  setup();
+  audio.play().catch(() => {}).finally(() => { setTimeout(() => { recovering = false; }, 3000); });
+  stuckSince = null;
+}
+setInterval(() => {
+  if (!wantPlaying || audio.paused) { stuckSince = null; return; }
+  if (audio.currentTime !== lastT) { lastT = audio.currentTime; stuckSince = null; return; }
+  stuckSince = stuckSince || Date.now();
+  if (Date.now() - stuckSince > 15000) recover('stuck');
+}, 3000);
+window.addEventListener('online', () => { if (wantPlaying) recover('back_online'); });
+
+/* ---- lock screen / Control Center ---- */
+if ('mediaSession' in navigator) {
+  const art = [192, 512].map(s => ({ src: `/icon-${s}.png`, sizes: `${s}x${s}`, type: 'image/png' }));
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: 'Quran Radio — Live', artist: 'Cairo, on Irish time', album: 'Quran Radio', artwork: art });
+  navigator.mediaSession.setActionHandler('play', () => start());
+  navigator.mediaSession.setActionHandler('pause', () => stop());
+  try { navigator.mediaSession.setActionHandler('stop', () => stop()); } catch (e) {}
+}
+function mediaArtist(text) {
+  if (!('mediaSession' in navigator) || !navigator.mediaSession.metadata) return;
+  navigator.mediaSession.metadata.artist = text;
+}
+
+setup();
+
+/* ---------------- prayer times ---------------- */
+
+const dubTime = e => new Date(e * 1000).toLocaleTimeString('en-GB', {
+  timeZone: 'Europe/Dublin', hour: '2-digit', minute: '2-digit' });
+const fmtIn = s => {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = Math.floor(s % 60);
+  return h ? `in ${h}h ${m}m` : m ? `in ${m}m ${String(x).padStart(2, '0')}s` : `in ${x}s`;
+};
+let P = null, skew = 0;
+async function loadPrayers() {
+  try {
+    const r = await fetch('/api/prayers', { cache: 'no-store' });
+    P = await r.json();
+    skew = P.now - Date.now() / 1000;
+    renderPrayers();
+  } catch (e) {}
+}
+function renderPrayers() {
+  if (!P || !P.prayers.length) return;
+  const now = Date.now() / 1000 + skew;
+  const next = P.prayers.find(p => p.time > now - 60);
+  $('prayer-card').hidden = false;
+  if (next) {
+    $('next-name').textContent = `${next.prayer} ${dubTime(next.time)}`;
+    $('next-in').textContent = next.time > now ? fmtIn(next.time - now) : 'now';
+    $('next-note').textContent = next.adhan_on_stream
+      ? '🔊 The adhan plays on this stream at prayer time.'
+      : 'The Cairo adhan airs close to this time, so it is not replaced.';
+    mediaArtist(`Next: ${next.prayer} ${dubTime(next.time)} · Cairo, on Irish time`);
+  }
+  const today = P.prayers.filter(p => p.today);
+  $('times').innerHTML = today.map(p =>
+    `<span class="${p === next ? 'next' : p.time < now ? 'past' : ''}">${p.prayer}<b>${dubTime(p.time)}</b></span>`
+  ).join('');
+}
+const clockFmt = new Intl.DateTimeFormat('en-IE', { timeZone: 'Europe/Dublin', hour: '2-digit', minute: '2-digit', hour12: false });
+setInterval(() => { $('clock').textContent = clockFmt.format(new Date()); renderPrayers(); }, 1000);
+$('clock').textContent = clockFmt.format(new Date());
+loadPrayers();
+setInterval(loadPrayers, 60000);
+
+/* ---------------- sleep timer ---------------- */
+
+let sleepAt = null;
+$('sleep').addEventListener('change', e => {
+  const min = Number(e.target.value);
+  sleepAt = min ? Date.now() + min * 60000 : null;
+  if (min) { track('sleep_timer_set', { minutes: min }); if (!wantPlaying) start(); }
+  checkSleep();
+});
+function checkSleep() {
+  if (!sleepAt) { $('sleep-left').textContent = ''; return; }
+  const left = (sleepAt - Date.now()) / 1000;
+  if (left <= 0) {
+    sleepAt = null; $('sleep').value = '0'; $('sleep-left').textContent = '';
+    if (wantPlaying) stop('Stopped by sleep timer');
+    return;
+  }
+  $('sleep-left').textContent = `Stopping in ${Math.floor(left / 60)}:${String(Math.floor(left % 60)).padStart(2, '0')}`;
+}
+setInterval(checkSleep, 1000);
+audio.addEventListener('timeupdate', checkSleep);   // keeps firing while the screen is locked
+
+/* ---------------- share ---------------- */
+
+const shareText = 'Quran Radio — Cairo\'s Quran station live on Irish time, with the adhan at Irish prayer times.';
+$('share').addEventListener('click', async () => {
+  const url = location.origin + '/';
+  if (navigator.share) {
+    try { await navigator.share({ title: 'Quran Radio', text: shareText, url }); track('share', { method: 'native' }); }
+    catch (e) {}
+    return;
+  }
+  try { await navigator.clipboard.writeText(`${shareText} ${url}`); toast('Link copied'); track('share', { method: 'copy' }); }
+  catch (e) { window.open('https://wa.me/?text=' + encodeURIComponent(`${shareText} ${url}`)); track('share', { method: 'whatsapp' }); }
+});
+$('copy-url').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(playlist); toast('Stream link copied'); } catch (e) {}
+});
+
+/* ---------------- add to home screen hint ---------------- */
+
+const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+if (!standalone && /iPhone|iPad/.test(navigator.userAgent)) {
+  $('install-hint').textContent = 'Tip: tap Share ↑ then “Add to Home Screen” to open Quran Radio like an app.';
+}
+window.addEventListener('appinstalled', () => track('app_installed'));
+if (standalone) track('opened_from_home_screen');
 </script>
 </body>
 </html>
