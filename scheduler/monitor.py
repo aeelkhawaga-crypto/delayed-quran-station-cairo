@@ -210,7 +210,12 @@ def _gap(a0, a1, b0, b1):
 
 
 def _static_uri(path):
-    return "/live-static/" + os.path.relpath(path, sch.STATIC)
+    # /live-static is served as immutable; chunk files change on re-chunk
+    try:
+        v = int(os.path.getmtime(path))
+    except OSError:
+        v = 0
+    return "/live-static/" + os.path.relpath(path, sch.STATIC) + f"?v={v}"
 
 
 def planned_splices(now, names):
@@ -280,6 +285,217 @@ def planned_splices(now, names):
                 plan[n] = (d, _static_uri(src))
             idx["filler"] += 1
     return plan
+
+
+# ---------------- media library (upload / trash / restore) ----------------
+# The only write path in the monitor. Files land in the same folders the
+# scheduler watches; it re-chunks them in the background (staged + swapped).
+
+MEDIA = {   # kind: (folder, chunkset kind, (min_s, max_s), next-index state key)
+    "adhan":   (sch.ADHANS, "adhan", (5, 900), "adhan_idx"),
+    "fajr":    (sch.FAJR_ADHANS, "fajr-adhan", (5, 900), "fajr_adhan_idx"),
+    "filler":  (sch.FILLERS, "filler", (10, 3600), "filler_idx"),
+    "starter": (sch.STARTERS, "starter", (1, 120), None),
+}
+MAX_UPLOAD = 60 * 1024 * 1024
+GUARD_S = 300          # no changes this close to a splice that uses the kind
+TRASH = ".trash"
+_dur_cache = {}
+_media_lock = threading.Lock()
+
+
+class CountingReader:
+    """Wraps the request body so a rejected upload can drain only the rest."""
+    def __init__(self, f):
+        self.f, self.n = f, 0
+
+    def read(self, k):
+        b = self.f.read(k)
+        self.n += len(b)
+        return b
+
+
+class MediaError(Exception):
+    def __init__(self, msg, status=400):
+        super().__init__(msg)
+        self.status = status
+
+
+def _probe(path):
+    try:
+        key = (path, os.path.getmtime(path))
+    except OSError:
+        return None
+    if key not in _dur_cache:
+        _dur_cache[key] = sch.probe_duration(path)
+    return _dur_cache[key]
+
+
+def _audio_files(folder):
+    try:
+        return sorted(f for f in os.listdir(folder)
+                      if not f.startswith(".")
+                      and os.path.splitext(f)[1].lower() in sch.AUDIO_EXT
+                      and os.path.isfile(os.path.join(folder, f)))
+    except OSError:
+        return []
+
+
+def _safe_name(name):
+    base = os.path.basename(name or "").strip().lstrip(".")
+    stem, ext = os.path.splitext(base)
+    if ext.lower() not in sch.AUDIO_EXT:
+        raise MediaError(f"not an audio file ({', '.join(sch.AUDIO_EXT)})")
+    stem = re.sub(r"[^\w\-. ()]", "_", stem).strip() or "audio"
+    return stem[:100] + ext.lower()
+
+
+def media_busy(kind, now):
+    """Reason string if a splice using this kind is due soon, else None."""
+    st = load_splicer_state()
+    done = st.get("spliced", {}) if isinstance(st.get("spliced"), dict) else {}
+    if kind == "filler":
+        for w in sch.cairo_windows(now):
+            due = w["start"] - 60
+            if f"cairo-{int(w['start'])}" not in done and now - 30 <= due <= now + GUARD_S:
+                return f"Cairo {w['name']} filler is spliced at {iso_local(due, 0)[11:16]} UTC"
+    else:
+        for start, prayer in sch.irish_prayer_events(now):
+            due = start - 60
+            if f"irish-{int(start)}" not in done and now - 30 <= due <= now + GUARD_S:
+                return f"{(prayer or 'an').title()} adhan is spliced at {iso_local(due, 0)[11:16]} UTC"
+    return None
+
+
+def api_media(now):
+    st = load_splicer_state()
+    try:
+        cst = json.load(open(os.path.join(sch.STATIC, ".chunk-status.json")))
+    except Exception:
+        cst = {}
+    out = {}
+    for kind, (folder, ckind, (lo, hi), idxkey) in MEDIA.items():
+        files = _audio_files(folder)
+        nxt = files[st.get(idxkey, 0) % len(files)] if idxkey and files else None
+        rows = []
+        for f in files:
+            p = os.path.join(folder, f)
+            rows.append({"name": f, "size": os.path.getsize(p), "duration": _probe(p),
+                         "next": f == nxt,
+                         "prayer": os.path.splitext(f)[0].lower() if kind == "starter" else None})
+        trash = []
+        tdir = os.path.join(folder, TRASH)
+        for f in sorted(_audio_files(tdir), reverse=True):
+            orig = f.split("__", 1)[1] if "__" in f else f
+            trash.append({"name": f, "orig": orig,
+                          "deleted": os.path.getmtime(os.path.join(tdir, f))})
+        prep = (cst.get(ckind) or {}).get("state") == "preparing"
+        out[kind] = {"files": rows, "trash": trash[:50], "preparing": prep,
+                     "limits": [lo, hi], "busy": media_busy(kind, now)}
+    out["prayers"] = [p.lower() for p in sch.PRAYERS]
+    return out
+
+
+def _media_dir(kind):
+    if kind not in MEDIA:
+        raise MediaError("unknown kind")
+    return MEDIA[kind][0]
+
+
+def _to_trash(folder, name):
+    tdir = os.path.join(folder, TRASH)
+    os.makedirs(tdir, exist_ok=True)
+    stamp = datetime.datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    os.replace(os.path.join(folder, name), os.path.join(tdir, f"{stamp}__{name}"))
+
+
+def media_upload(kind, name, prayer, rfile, length, now):
+    folder = _media_dir(kind)
+    if length <= 0 or length > MAX_UPLOAD:
+        raise MediaError(f"file must be 1 byte to {MAX_UPLOAD // 2**20} MB", 413)
+    reason = media_busy(kind, now)
+    if reason:
+        raise MediaError(f"not now: {reason}. Try again in a few minutes.", 409)
+    fname = _safe_name(name)
+    if kind == "starter":
+        if (prayer or "").lower() not in [p.lower() for p in sch.PRAYERS]:
+            raise MediaError("choose a prayer for the starter")
+        fname = prayer.title() + os.path.splitext(fname)[1]
+    tmp = os.path.join(folder, f".upload-{os.getpid()}-{int(now * 1000)}{os.path.splitext(fname)[1]}")
+    try:
+        with open(tmp, "wb") as f:
+            left = length
+            while left > 0:
+                chunk = rfile.read(min(left, 256 * 1024))
+                if not chunk:
+                    raise MediaError("upload interrupted")
+                f.write(chunk)
+                left -= len(chunk)
+        dur = sch.probe_duration(tmp)
+        lo, hi = MEDIA[kind][2]
+        if not dur:
+            raise MediaError("could not read this audio file")
+        if not lo <= dur <= hi:
+            raise MediaError(f"length {dur:.0f}s is outside {lo}-{hi}s for {kind}")
+        with _media_lock:
+            if kind == "starter":
+                for f in _audio_files(folder):      # one starter per prayer
+                    if os.path.splitext(f)[0].lower() == prayer.lower():
+                        _to_trash(folder, f)
+            elif os.path.exists(os.path.join(folder, fname)):
+                raise MediaError(f"{fname} already exists — trash it first or rename", 409)
+            os.replace(tmp, os.path.join(folder, fname))
+        log(f"media: uploaded {kind}/{fname} ({dur:.0f}s)")
+        return {"ok": True, "name": fname, "duration": dur}
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def media_trash(kind, name, now):
+    folder = _media_dir(kind)
+    name = os.path.basename(name or "")
+    if name not in _audio_files(folder):
+        raise MediaError("no such file", 404)
+    reason = media_busy(kind, now)
+    if reason:
+        raise MediaError(f"not now: {reason}. Try again in a few minutes.", 409)
+    with _media_lock:
+        _to_trash(folder, name)
+    log(f"media: trashed {kind}/{name}")
+    return {"ok": True}
+
+
+def media_restore(kind, tname, now):
+    folder = _media_dir(kind)
+    tdir = os.path.join(folder, TRASH)
+    tname = os.path.basename(tname or "")
+    if tname not in _audio_files(tdir):
+        raise MediaError("no such file in trash", 404)
+    reason = media_busy(kind, now)
+    if reason:
+        raise MediaError(f"not now: {reason}. Try again in a few minutes.", 409)
+    orig = tname.split("__", 1)[1] if "__" in tname else tname
+    with _media_lock:
+        if kind == "starter":
+            for f in _audio_files(folder):
+                if os.path.splitext(f)[0].lower() == os.path.splitext(orig)[0].lower():
+                    _to_trash(folder, f)
+        elif os.path.exists(os.path.join(folder, orig)):
+            raise MediaError(f"{orig} already exists", 409)
+        os.replace(os.path.join(tdir, tname), os.path.join(folder, orig))
+    log(f"media: restored {kind}/{orig}")
+    return {"ok": True, "name": orig}
+
+
+def media_file_path(kind, name, trash):
+    folder = _media_dir(kind)
+    if trash:
+        folder = os.path.join(folder, TRASH)
+    name = os.path.basename(name or "")
+    if name not in _audio_files(folder):
+        raise MediaError("no such file", 404)
+    return os.path.join(folder, name)
 
 
 # ---------------- endpoints ----------------
@@ -444,7 +660,7 @@ def range_items(now, start, end):
     for t, n in picked:
         if n in plan:
             d, uri = plan[n]
-            path = os.path.join(sch.STATIC, uri[len("/live-static/"):])
+            path = os.path.join(sch.STATIC, uri[len("/live-static/"):].split("?")[0])
         else:
             d = sdurs.get(n) or idurs.get(n) or f"{sch.SEG}.000000"
             uri, path = f"/archive/{n}", os.path.join(ARCHIVE, n)
@@ -528,8 +744,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path in ("/", "/index.html"):
                 return self._static("index.html")
-            if path == "/monitor.js":
-                return self._static("monitor.js")
+            if path in ("/monitor.js", "/media.js"):
+                return self._static(path[1:])
             if path == "/hls.min.js":
                 return self._static("hls.min.js")
             if path == "/api/overview":
@@ -545,6 +761,12 @@ class Handler(BaseHTTPRequestHandler):
                 if pl is None:
                     return self._send('{"error": "archive empty"}', status=404)
                 return self._send(pl, ctype="application/vnd.apple.mpegurl")
+            if path == "/api/media":
+                return self._send(json.dumps(api_media(now)))
+            if path == "/api/media/file":
+                p = media_file_path(q.get("kind", [""])[0], q.get("name", [""])[0],
+                                    q.get("trash", ["0"])[0] == "1")
+                return self._send_audio(p)
             if path == "/api/download":
                 start = float(q["start"][0])
                 end = float(q["end"][0])
@@ -560,8 +782,61 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send('{"error": "archive empty"}', status=404)
                 return self._send_file(*res)
             self._send('{"error": "not found"}', status=404)
+        except MediaError as e:
+            self._send(json.dumps({"error": str(e)}), status=e.status)
         except Exception as e:
             self._send(json.dumps({"error": str(e)}), status=500)
+
+    def do_POST(self):
+        now = time.time()
+        u = urlparse(self.path)
+        q = parse_qs(u.query)
+        g = lambda k: q.get(k, [""])[0]
+        length = int(self.headers.get("Content-Length") or 0)
+        body = CountingReader(self.rfile)
+        try:
+            # CSRF: browsers only send this custom header from our own page
+            # (cross-site requests would need a CORS preflight we never allow)
+            if self.headers.get("X-Monitor-Action") != "1":
+                raise MediaError("forbidden", 403)
+            if u.path == "/api/media/upload":
+                res = media_upload(g("kind"), g("name"), g("prayer"), body, length, now)
+            elif u.path == "/api/media/trash":
+                res = media_trash(g("kind"), g("name"), now)
+            elif u.path == "/api/media/restore":
+                res = media_restore(g("kind"), g("name"), now)
+            else:
+                raise MediaError("not found", 404)
+            self._send(json.dumps(res))
+        except MediaError as e:
+            self._drain(body, length - body.n)
+            self._send(json.dumps({"error": str(e)}), status=e.status)
+        except Exception as e:
+            self._drain(body, length - body.n)
+            self._send(json.dumps({"error": str(e)}), status=500)
+
+    def _drain(self, body, length):
+        """Consume the unread rest of a request body so the client gets the reply."""
+        try:
+            while length > 0:
+                chunk = body.read(min(length, 256 * 1024))
+                if not chunk:
+                    break
+                length -= len(chunk)
+        except Exception:
+            pass
+
+    def _send_audio(self, path):
+        ext = os.path.splitext(path)[1].lower()
+        ctype = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac",
+                 ".wav": "audio/wav", ".ogg": "audio/ogg", ".flac": "audio/flac"}.get(ext, "application/octet-stream")
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(os.path.getsize(path)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        with open(path, "rb") as f:
+            shutil.copyfileobj(f, self.wfile, 256 * 1024)
 
     def _send_file(self, path, filename):
         try:
