@@ -19,6 +19,9 @@ let hls = null;
 
 const fmtE = e => new Date(e * 1000).toISOString().slice(0, 19).replace("T", " ");
 const fmtDub = e => new Date(e * 1000).toLocaleTimeString("en-GB", { timeZone: "Europe/Dublin" });
+const fmtDubHM = e => new Date(e * 1000).toLocaleTimeString("en-GB", { timeZone: "Europe/Dublin", hour: "2-digit", minute: "2-digit" });
+// All times on this page are Irish time. Archive segments are named by their
+// recording time; they air in Ireland DELAY seconds later (air = t + delay).
 const fmtDur = s => s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m`
                   : s >= 60 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s` : `${Math.round(s)}s`;
 
@@ -46,8 +49,8 @@ function renderCards(o) {
       <div class="v ${plCls}">${pl.segments} segments</div>
       <div class="s">seq ${pl.media_seq ?? "—"} · written ${pl.file_age_s ?? "—"}s ago</div></div>
     <div class="card"><div class="k">Archive span</div>
-      <div class="v">${rec.oldest ? fmtE(rec.oldest).slice(11, 16) + " → " + fmtE(rec.newest).slice(11, 16) : "—"}</div>
-      <div class="s">UTC, ${((rec.newest - rec.oldest) / 3600).toFixed(1)}h</div></div>
+      <div class="v">${rec.oldest ? fmtDubHM(rec.oldest + o.delay) + " → " + fmtDubHM(rec.newest + o.delay) : "—"}</div>
+      <div class="s">air times in Ireland, ${((rec.newest - rec.oldest) / 3600).toFixed(1)}h</div></div>
     <div class="card"><div class="k">Healed gaps</div>
       <div class="v ${o.healed_segments ? "warn" : "ok"}">${o.healed_segments}</div>
       <div class="s">synthesized filler segments</div></div>
@@ -111,7 +114,7 @@ function renderComing() {
     tr.innerHTML = `
       <td>${fmtDub(Math.max(air, TL.now_utc))}</td>
       <td class="dim">${air <= TL.now_utc ? "airing now" : fmtDur(air - TL.now_utc)}</td>
-      <td class="dim">${fmtE(r.t0).slice(11)}</td>
+      <td class="dim">${fmtDub(r.t1 + TL.delay)}</td>
       <td><span class="kind-dot" style="background:${KIND_COLOR[r.kind]}"></span>${what}</td>
       <td>${fmtDur(r.t1 - r.t0)}</td>
       <td><button data-t="${Math.max(r.pending ? r.t0 - 20 : r.t0, TL.airing_ts)}">▶ listen</button></td>`;
@@ -134,8 +137,8 @@ function renderEvents(o) {
     const file = r.kind === "dublin-adhan"
       ? (r.prayer === "fajr" ? o.pools.fajr.next : o.pools.adhan.next) ?? "—" : "";
     tr.innerHTML = `
-      <td>${fmtE(r.wall)}${isFuture ? ` <span class="dim">(in ${Math.round((r.wall - o.now_utc) / 60)}m)</span>` : ""}</td>
-      <td>${fmtE(r.content)}</td>
+      <td>${fmtDubHM(r.wall)}${isFuture ? ` <span class="dim">(in ${Math.round((r.wall - o.now_utc) / 60)}m)</span>` : ""}</td>
+      <td>${r.wall_end ? fmtDubHM(r.wall_end) : "—"}</td>
       <td>${r.kind === "cairo-suppression" ? "Cairo suppression" : r.kind === "fajr-adhan" ? "Fajr adhan" : "Dublin adhan"}</td>
       <td>${r.prayer ? r.prayer[0].toUpperCase() + r.prayer.slice(1) : "—"}</td>
       <td><span class="pill ${r.status}">${r.status}</span></td>
@@ -173,7 +176,7 @@ function drawTimeline() {
   ctx.textAlign = "center";
   for (let h = hour0; h < t1; h += 3600) {
     ctx.beginPath(); ctx.moveTo(x(h), 8); ctx.lineTo(x(h), H - 8); ctx.stroke();
-    ctx.fillText(new Date(h * 1000).toISOString().slice(11, 16), x(h), H - 1);
+    ctx.fillText(fmtDubHM(h + TL.delay), x(h), H - 1);
   }
   // pending marks (outlined)
   for (const m of TL.marks) {
@@ -211,7 +214,7 @@ function drawTimeline() {
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(Math.round(px) + 0.5, 0); ctx.lineTo(Math.round(px) + 0.5, H); ctx.stroke();
     ctx.fillStyle = "#ffd23f";
-    const lab = fmtE(ph).slice(11, 19);
+    const lab = fmtDub(ph + TL.delay);
     ctx.font = "10px sans-serif";
     ctx.textAlign = px > W - 80 ? "right" : "left";
     ctx.fillText(lab, px + (px > W - 80 ? -8 : 8), H - 14);
@@ -264,8 +267,7 @@ function renderSel() {
   if (!sel) { bar.style.display = "none"; return; }
   bar.style.display = "flex";
   $("sel-txt").textContent =
-    `Selected: airs ${fmtDub(sel.a + TL.delay)} → ${fmtDub(sel.b + TL.delay)} Dublin ` +
-    `(content ${fmtE(sel.a).slice(11, 19)}–${fmtE(sel.b).slice(11, 19)} UTC) · ${fmtDur(sel.b - sel.a)}`;
+    `Selected: ${fmtDub(sel.a + TL.delay)} → ${fmtDub(sel.b + TL.delay)} Irish time · ${fmtDur(sel.b - sel.a)}`;
   $("btn-sel-dl").href = `/monitor/api/download?start=${Math.floor(sel.a)}&end=${Math.ceil(sel.b)}`;
   $("sel-note").textContent = "";
 }
@@ -290,8 +292,8 @@ canvas.addEventListener("mousemove", ev => {
   h.style.top = (ev.clientY - r.top - 8) + "px";
   const seg = TL.segments.find(s => t >= s[0] && t < s[0] + TL.seg);
   const air = t + TL.delay;
-  h.textContent = `${seg ? KIND_LABEL[seg[1]] : "no segment"} — content ${fmtE(t).slice(11, 19)} UTC, ` +
-    (air < TL.now_utc ? `aired ${fmtDub(air)}` : `airs ${fmtDub(air)} Dublin (in ${fmtDur(air - TL.now_utc)})`);
+  h.textContent = `${seg ? KIND_LABEL[seg[1]] : "no segment"} — ` +
+    (air < TL.now_utc ? `aired ${fmtDub(air)}` : `airs ${fmtDub(air)} (in ${fmtDur(air - TL.now_utc)})`);
 });
 
 /* ---------------- player ---------------- */
@@ -346,10 +348,10 @@ function updatePos() {
   if (ph == null || !TL) return;
   const behind = Math.round(TL.now_utc_live() - TL.delay - ph);
   $("pos").textContent =
-    `${playing ? "playing" : "paused at"} ${kindAt(ph)} — content ${fmtE(ph).slice(11, 19)} UTC` +
-    (behind > 15 ? ` — aired ${fmtDub(ph + TL.delay)} Dublin (${fmtDur(behind)} ago)`
-     : behind < -15 ? ` — airs ${fmtDub(ph + TL.delay)} Dublin (in ${fmtDur(-behind)})`
-     : " — in sync with the broadcast");
+    `${playing ? "playing" : "paused at"} ${kindAt(ph)} — ${fmtDub(ph + TL.delay)} Irish time` +
+    (behind > 15 ? ` (aired ${fmtDur(behind)} ago)`
+     : behind < -15 ? ` (airs in ${fmtDur(-behind)})`
+     : " (on air now)");
 }
 
 $("btn-play").addEventListener("click", () => {
@@ -388,7 +390,8 @@ async function refreshTimeline() {
     TL = await api("/monitor/api/timeline?hours=4.5");
     const fetchedAt = Date.now() / 1000, serverNow = TL.now_utc;
     TL.now_utc_live = () => serverNow + (Date.now() / 1000 - fetchedAt);
-    $("ck-air").textContent = fmtE(TL.airing_ts).slice(11, 19);
+    $("ck-air").textContent = new Date(TL.airing_ts * 1000).toLocaleTimeString("en-GB",
+      { timeZone: "Africa/Cairo", hour: "2-digit", minute: "2-digit" });
     drawTimeline();
     renderComing();
     $("tl-ahead").textContent = (TL.delay / 3600).toFixed(1).replace(/\.0$/, "");
