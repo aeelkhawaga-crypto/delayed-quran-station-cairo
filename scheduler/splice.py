@@ -263,7 +263,7 @@ def fill_pool():
     return [sil] if sil else []
 
 
-def heal_archive_gaps(now, delay=None):
+def heal_archive_gaps(now):
     """Fill missing not-yet-aired archive slots (one hole per tick, and
     forward past the newest name while the recorder is down) with
     synthesized filler segments, PTS-chained from the previous segment."""
@@ -272,7 +272,7 @@ def heal_archive_gaps(now, delay=None):
         return
     have = {t for t, _ in slots}
     limit = now - HEAL_MIN_AGE
-    floor = now - (delay or DELAY) + LEAD   # slots before this have (nearly) aired
+    floor = now - DELAY + LEAD          # slots before this have (nearly) aired
     missing = []
     prev = None
     for ts, _ in slots:
@@ -361,11 +361,8 @@ def prune_archive(now):
 
 def tick():
     now = time.time()
-    cfg = sch.get_config()
-    DELAY = cfg["delay"]          # live overrides (admin-config.json)
-    MIN_GAP = cfg["min_gap"]
     prune_archive(now)
-    heal_archive_gaps(now, DELAY)
+    heal_archive_gaps(now)
     adhan_sets = chunkset_dirs("adhan")
     fajr_adhan_sets = chunkset_dirs("fajr-adhan")
     filler_sets = chunkset_dirs("filler")
