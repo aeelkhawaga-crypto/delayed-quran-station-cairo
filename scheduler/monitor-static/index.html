@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quran Radio — Monitor</title>
+<style>
+  :root { --bg:#0b1520; --card:#101f31; --line:#1e3350; --text:#dce7f5; --dim:#7d93ad;
+          --quran:#3a6ea5; --dublin:#2fbf71; --fajr:#9be15d; --cairo:#e0a63a;
+          --healed:#e05a8c; --starter:#5ec8d8; --ok:#2fbf71; --bad:#e05a5a; --warn:#e0a63a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:14px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display:flex; gap:1rem; align-items:baseline; padding:.7rem 1rem;
+           border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:1.05rem; margin:0; }
+  header .clock { color:var(--dim); font-variant-numeric:tabular-nums; }
+  header .clock b { color:var(--text); }
+  #live-badge { background:var(--ok); color:#04120a; font-weight:700;
+                border-radius:4px; padding:.1rem .5rem; font-size:.75rem; }
+  main { padding:1rem; max-width:1200px; margin:0 auto; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+           gap:.6rem; margin-bottom:1rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px;
+          padding:.55rem .7rem; }
+  .card .k { color:var(--dim); font-size:.72rem; text-transform:uppercase;
+             letter-spacing:.04em; }
+  .card .v { font-size:1.05rem; font-weight:600; font-variant-numeric:tabular-nums; }
+  .card .s { color:var(--dim); font-size:.75rem; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:8px;
+           padding:.8rem; margin-bottom:1rem; }
+  .panel h2 { margin:0 0 .6rem; font-size:.85rem; color:var(--dim);
+              text-transform:uppercase; letter-spacing:.05em; }
+  #timeline { width:100%; height:110px; display:block; cursor:crosshair;
+              border-radius:4px; background:#0a111b; }
+  .legend { display:flex; gap:1rem; flex-wrap:wrap; margin-top:.5rem;
+            font-size:.75rem; color:var(--dim); }
+  .legend i { display:inline-block; width:.7rem; height:.7rem; border-radius:2px;
+              margin-right:.3rem; vertical-align:-1px; }
+  #playbar { display:flex; gap:.6rem; align-items:center; flex-wrap:wrap; }
+  button { background:#1a2f4a; color:var(--text); border:1px solid var(--line);
+           border-radius:6px; padding:.4rem .8rem; cursor:pointer; font-size:.85rem; }
+  button:hover { background:#233d5f; }
+  button.on { background:var(--quran); border-color:var(--quran); color:#fff; }
+  #pos { font-variant-numeric:tabular-nums; color:var(--dim); min-width:22rem; }
+  table { width:100%; border-collapse:collapse; font-size:.85rem; }
+  th { text-align:left; color:var(--dim); font-weight:500; font-size:.72rem;
+       text-transform:uppercase; padding:.3rem .5rem; border-bottom:1px solid var(--line); }
+  td { padding:.35rem .5rem; border-bottom:1px solid #16273d;
+       font-variant-numeric:tabular-nums; }
+  .pill { border-radius:10px; padding:.05rem .5rem; font-size:.72rem; font-weight:600; }
+  .pill.spliced { background:#123524; color:var(--ok); }
+  .pill.pending { background:#3a2f10; color:var(--warn); }
+  .pill.skipped { background:#3a1414; color:var(--bad); }
+  #hover { position:absolute; pointer-events:none; background:#000c; padding:.15rem .45rem;
+           border-radius:4px; font-size:.72rem; display:none; z-index:5; }
+  .tl-wrap { position:relative; }
+  .dim { color:var(--dim); }
+  .kind-dot { display:inline-block; width:.6rem; height:.6rem; border-radius:2px;
+              margin-right:.35rem; vertical-align:0; }
+  td button { padding:.15rem .55rem; font-size:.75rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Quran Radio Monitor</h1>
+  <span id="live-badge">LIVE</span>
+  <span class="clock">Dublin <b id="ck-dub">—</b></span>
+  <span class="clock">Cairo <b id="ck-cai">—</b></span>
+  <span class="clock">UTC <b id="ck-utc">—</b></span>
+  <span class="clock">Airing (UTC) <b id="ck-air">—</b></span>
+</header>
+<main>
+  <div class="cards" id="cards"></div>
+
+  <div class="panel">
+    <h2>Archive timeline — click anywhere to listen (left of the dashed line has aired; right of it is saved and will air over the next ~<span id="tl-ahead">2</span>h)</h2>
+    <div class="tl-wrap">
+      <canvas id="timeline"></canvas>
+      <div id="hover"></div>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--quran)"></i>Quran</span>
+      <span><i style="background:var(--dublin)"></i>Dublin adhan</span>
+      <span><i style="background:var(--fajr)"></i>Fajr adhan</span>
+      <span><i style="background:var(--cairo)"></i>Cairo suppressed (filler)</span>
+      <span><i style="background:var(--starter)"></i>Prayer starter</span>
+      <span><i style="background:var(--healed)"></i>Healed gap (filler)</span>
+    </div>
+    <div id="playbar" style="margin-top:.7rem">
+      <button id="btn-play">▶ Play</button>
+      <button id="btn-live" class="on">Live</button>
+      <button id="btn-back">−1 min</button>
+      <button id="btn-fwd">+1 min</button>
+      <span id="pos">—</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Coming up — already saved (air times are Dublin)</h2>
+    <table id="tbl-coming"><thead><tr>
+      <th>Airs (Dublin)</th><th>In</th><th>Content (UTC)</th><th>What</th><th>Length</th><th></th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+
+  <div class="panel">
+    <h2>Splice schedule — next hours (wall time vs delayed content time)</h2>
+    <table id="tbl-events"><thead><tr>
+      <th>Wall (UTC)</th><th>Content slot (UTC)</th><th>Type</th><th>Prayer</th>
+      <th>Status</th><th>Adhan file that rotates in</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+</main>
+<script src="hls.min.js"></script>
+<script src="monitor.js"></script>
+</body>
+</html>

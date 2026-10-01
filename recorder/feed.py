@@ -17,13 +17,15 @@ Why this exists (replaces `curl | ffmpeg`):
 - Only whole, validated MP3 frames are forwarded; HTTP errors / HTML
   bodies never reach ffmpeg.
 """
-import os, sys, time, queue, threading, urllib.request
+import os, sys, json, time, queue, threading, urllib.request
 
 URL = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("STREAM_URL", "")
 READ_TIMEOUT = float(os.environ.get("FEED_READ_TIMEOUT", "15"))
 SILENCE_GRACE = float(os.environ.get("FEED_SILENCE_GRACE", "3"))
 TAIL_BYTES = 512 * 1024    # ~55 s of forwarded stream kept for de-duplication
 PROBE_BYTES = 4096         # first bytes of a new connection looked up in the tail
+STATUS_FILE = os.environ.get("FEED_STATUS_FILE", "/archive/.feeder.json")
+STATUS_EVERY = 5.0
 
 BITRATES = {  # kbps, index 1..14
     1: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],   # MPEG-1 L3
@@ -84,6 +86,7 @@ def reader(q):
                         raise IOError("stream ended")
                     q.put(("data", chunk))
         except Exception as e:
+            q.put(("lost", str(e)[:200]))
             log(f"connection lost: {e}; reconnecting in {backoff}s")
             time.sleep(backoff)
             backoff = min(backoff * 2, 10)
@@ -102,6 +105,23 @@ def main():
     last_real = time.time()
     silence_s = 0.0         # silence fed during the current outage
     connects = 0
+    stats = {"started": time.time(), "connected": False, "connects": 0,
+             "last_connect": None, "last_error": None, "last_error_at": None,
+             "replay_dropped_bytes": 0, "replay_drops": 0, "last_drop_bytes": 0,
+             "no_overlap_reconnects": 0, "silence_active": False,
+             "silence_total_s": 0.0, "outages": 0, "last_data": None,
+             "bytes_forwarded": 0}
+    status_at = 0.0
+
+    def write_status():
+        stats["updated"] = time.time()
+        try:
+            tmp = STATUS_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(stats, f)
+            os.replace(tmp, STATUS_FILE)
+        except OSError:
+            pass
 
     def accept(data):
         nonlocal tail
@@ -134,8 +154,10 @@ def main():
             i += n
         del buf[:i]
         if sent:
-            out.write(b"".join(sent))
+            data = b"".join(sent)
+            out.write(data)
             out.flush()
+            stats["bytes_forwarded"] += len(data)
 
     while True:
         try:
@@ -146,6 +168,9 @@ def main():
         if kind == "connect":
             connects += 1
             probe, skip = bytearray(), 0
+            stats.update(connected=True, connects=connects, last_connect=time.time())
+        elif kind == "lost":
+            stats.update(connected=False, last_error=data, last_error_at=time.time())
         elif kind == "data":
             if probe is not None:
                 probe.extend(data)
@@ -156,9 +181,13 @@ def main():
                 if p >= 0:
                     skip = len(tail) - p
                     log(f"reconnect #{connects}: dropped {skip} replayed bytes")
+                    stats["replay_dropped_bytes"] += skip
+                    stats["replay_drops"] += 1
+                    stats["last_drop_bytes"] = skip
                 else:
                     if connects > 1:
                         log(f"reconnect #{connects}: no overlap (content gap)")
+                        stats["no_overlap_reconnects"] += 1
                     buf.clear()            # drop the old partial frame
             if skip:
                 d = min(skip, len(data))
@@ -169,6 +198,7 @@ def main():
                 flush_frames()
                 last_real = time.time()
                 silence_s = 0.0
+                stats.update(last_data=last_real, silence_active=False)
 
         # outage: keep the timeline moving with real-time silence
         if header is not None:
@@ -179,9 +209,16 @@ def main():
                 if silence_s == 0.0:
                     log("source silent: feeding silence")
                     buf.clear()            # partial frame can never complete
+                    stats["outages"] += 1
                 out.write(frame * n)
                 out.flush()
                 silence_s += n * dur
+                stats["silence_total_s"] = round(stats["silence_total_s"] + n * dur, 1)
+                stats["silence_active"] = True
+
+        if time.time() - status_at >= STATUS_EVERY:
+            status_at = time.time()
+            write_status()
 
 
 if __name__ == "__main__":
