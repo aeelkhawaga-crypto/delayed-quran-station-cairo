@@ -7,6 +7,7 @@ services:
       TZ: UTC
     volumes:
       - ./recorder/record.sh:/record.sh:ro
+      - ./recorder/feed.py:/feed.py:ro
       - ./data/archive:/archive
     entrypoint: ["/bin/sh", "/record.sh"]
     logging:
@@ -26,6 +27,7 @@ services:
       - ./data/live:/live
       - ./data/static:/live-static
       - ./adhans:/adhans:rw
+      - ./adhans-fajr:/adhans-fajr:ro
       - ./fillers:/fillers:rw
       - ./adhan-prefixes:/starters:rw
       - ./library:/library:rw

@@ -13,6 +13,9 @@ through the filenames and hear the inserted content where it belongs.
 - Irish Adhan: at each event one adhan file (round-robin) occupies the
   slots from the prayer's grid anchor; the stream continues afterwards
   from where the adhan ended (the skipped gap is an accepted tradeoff).
+  Fajr uses its own pool (adhans-fajr/ -> fajr-adhan-* chunksets) with a
+  separate round-robin when that folder has files; otherwise the shared
+  pool is used.
 - Prayer starters: a short starter (adhan-prefixes/<Prayer>.mp3) occupies
   the slots ending exactly at the adhan's anchor, so the adhan itself
   stays on time.
@@ -21,6 +24,10 @@ through the filenames and hear the inserted content where it belongs.
   fillers the Cairo adhan simply stays audible.
 - If an Irish adhan and a Cairo window overlap or are within MIN_GAP
   seconds, neither is spliced (normal delayed stream plays).
+- Archive gap healing: when the upstream stalls or the recorder restarts,
+  missing segment slots (and the stall tail) are synthesized from filler
+  chunksets — or silence if no fillers exist — PTS-chained to neighbours,
+  so the delayed playlist never runs dry (see heal_archive_gaps).
 
 A slot is fetched by players only during the ~30s before it airs, so the
 splice happens LEAD seconds before the event; that way no player holds
@@ -73,18 +80,12 @@ state = load_json(STATE_FILE, {})
 
 
 def archive_slots():
-    """[(content_ts_int, filename)] sorted, from the recorder index."""
-    out = []
-    try:
-        lines = open(os.path.join(ARCHIVE, "index.m3u8")).read().splitlines()
-    except Exception:
-        return out
-    for line in lines:
-        m = re.fullmatch(r"(\d{14})\.ts", os.path.basename(line.strip()))
-        if m:
-            dt = datetime.datetime.strptime(m.group(1), "%Y%m%d%H%M%S").replace(tzinfo=UTC)
-            out.append((int(dt.timestamp()), m.group(0)))
-    return sorted(out)
+    """[(content_ts_int, filename)] sorted, from the archive directory.
+
+    Not from the recorder's index.m3u8: the index restarts empty whenever
+    the recorder restarts, which hid the whole delayed window from the
+    splicer for DELAY seconds afterwards (events silently skipped)."""
+    return dir_slots()
 
 
 def chunk_segments(sdir):
@@ -205,12 +206,168 @@ def flatten(sets, start_idx):
     return out
 
 
+# ---------------- archive gap healing ----------------
+# The recorder feeds real-time silence through upstream outages, so holes
+# in the archive now only appear when the recorder itself restarts or dies.
+# The delayed playlist would freeze on such a hole, so this healer
+# synthesizes filler segments there (filler audio if available, silence
+# otherwise). Rules that keep it from fighting the rest of the system:
+# - only slots that have not aired yet (newer than now - DELAY + LEAD) are
+#   filled; older holes are history, and refilling them is what kept
+#   resurrecting deleted segments in a loop;
+# - a fill never overlaps the next real segment (g + SEG <= next name);
+# - one hole per tick, PTS-chained from the segment right before it;
+# - names are final once HEAL_MIN_AGE old, so only slots that old are filled.
+
+HEAL_MIN_AGE = 120.0
+FILL_MAX = 12   # max slots healed per tick (bounds CPU after a long outage)
+KEEP_SECONDS = int(float(os.environ.get("ARCHIVE_HOURS", "4")) * 3600) + 1800
+PRUNE_EVERY = 300.0
+
+
+def dir_slots():
+    """[(ts, name)] of well-formed segments in the archive dir, sorted."""
+    out = []
+    for f in glob.glob(os.path.join(ARCHIVE, "*.ts")):
+        b = os.path.basename(f)
+        m = re.fullmatch(r"(\d{14})\.ts", b)
+        if m:
+            dt = datetime.datetime.strptime(m.group(1), "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+            out.append((int(dt.timestamp()), b))
+    return sorted(out)
+
+
+def silence_chunk():
+    """A cached 10s silent segment (fallback fill material)."""
+    path = os.path.join(STATIC, "silence-chunk.ts")
+    if not os.path.exists(path):
+        r = subprocess.run(["ffmpeg", "-nostdin", "-y", "-v", "error",
+                            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                            "-t", str(SEG), "-c:a", "aac", "-b:a", "96k",
+                            "-ac", "2", "-ar", "44100", "-f", "mpegts", path],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            log(f"silence chunk generation failed: {r.stderr.strip()[:150]}")
+            return None
+    return path
+
+
+def fill_pool():
+    """Cyclic list of fill material paths: filler chunk segments, else silence."""
+    pool = []
+    for d in chunkset_dirs("filler"):
+        pool.extend(p for _, p in chunk_segments(d))
+    if pool:
+        return pool
+    sil = silence_chunk()
+    return [sil] if sil else []
+
+
+def heal_archive_gaps(now, delay=None):
+    """Fill missing not-yet-aired archive slots (one hole per tick, and
+    forward past the newest name while the recorder is down) with
+    synthesized filler segments, PTS-chained from the previous segment."""
+    slots = dir_slots()
+    if not slots:
+        return
+    have = {t for t, _ in slots}
+    limit = now - HEAL_MIN_AGE
+    floor = now - (delay or DELAY) + LEAD   # slots before this have (nearly) aired
+    missing = []
+    prev = None
+    for ts, _ in slots:
+        if prev is not None and ts - prev >= 2 * SEG and ts > floor:
+            g = prev + SEG
+            while g + SEG <= ts and g <= limit:
+                if g > floor and g not in have:
+                    missing.append(g)
+                g += SEG
+            if missing:
+                break                   # one hole per tick: one PTS chain
+        prev = ts
+    if not missing and slots[-1][0] < limit:   # recorder stalled/dead
+        g = slots[-1][0] + SEG
+        while g <= limit:
+            if g > floor and g not in have:
+                missing.append(g)
+            g += SEG
+    if not missing:
+        return
+    missing = missing[:FILL_MAX]   # pace catch-up; the rest lands next ticks
+    pool = fill_pool()
+    if not pool:
+        if now - state.get("heal_warned", 0) > 600:
+            state["heal_warned"] = now
+            save_json(STATE_FILE, state)
+            log(f"heal: {len(missing)} slot(s) missing but no filler material")
+        return
+    earlier = [(t, n) for t, n in slots if t < missing[0]]
+    prev_path = os.path.join(ARCHIVE, earlier[-1][1]) if earlier else None
+    prev_vals = _pts_list(prev_path) if prev_path else []
+    base = (max(prev_vals) + FRAME_TICKS) if prev_vals else None
+    start_i = state.get("heal_idx", 0)
+    made = 0
+    for i, g in enumerate(missing):
+        name = datetime.datetime.fromtimestamp(g, UTC).strftime("%Y%m%d%H%M%S") + ".ts"
+        dst = os.path.join(ARCHIVE, name)
+        if os.path.exists(dst):
+            continue
+        tmp = os.path.join(ARCHIVE, "." + name + ".tmp")
+        src = pool[(start_i + i) % len(pool)]
+        try:
+            if base is not None:
+                _write_aligned(src, tmp, base + int(i * SEG * 90000))
+            else:
+                shutil.copyfile(src, tmp)
+            os.replace(tmp, dst)
+            made += 1
+        except Exception as e:
+            log(f"heal: {name} failed: {e}")
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            break
+    if made:
+        state["heal_idx"] = (start_i + made) % len(pool)
+        save_json(STATE_FILE, state)
+        t0 = datetime.datetime.fromtimestamp(missing[0], UTC)
+        t1 = datetime.datetime.fromtimestamp(missing[-1], UTC)
+        log(f"heal: filled {made} slot(s) {t0:%H:%M:%S}..{t1:%H:%M:%S} UTC")
+
+
+def prune_archive(now):
+    """Delete archive files whose NAME is older than the retention window.
+
+    The recorder's own cleanup goes by mtime, which never catches files the
+    splicer rewrote (spliced/healed slots get a fresh mtime)."""
+    if now - state.get("pruned_at", 0) < PRUNE_EVERY:
+        return
+    state["pruned_at"] = now
+    cutoff = now - KEEP_SECONDS
+    n = 0
+    for b in os.listdir(ARCHIVE):
+        m = re.fullmatch(r"\.?(\d{14})(\.ts)?(\.tmp)?", b)
+        if not m:
+            continue
+        ts = datetime.datetime.strptime(m.group(1), "%Y%m%d%H%M%S").replace(tzinfo=UTC).timestamp()
+        if ts < cutoff:
+            try:
+                os.remove(os.path.join(ARCHIVE, b))
+                n += 1
+            except OSError:
+                pass
+    if n:
+        log(f"prune: removed {n} archive file(s) older than {KEEP_SECONDS // 3600}h")
+
+
 def tick():
     now = time.time()
     cfg = sch.get_config()
     DELAY = cfg["delay"]          # live overrides (admin-config.json)
     MIN_GAP = cfg["min_gap"]
+    prune_archive(now)
+    heal_archive_gaps(now, DELAY)
     adhan_sets = chunkset_dirs("adhan")
+    fajr_adhan_sets = chunkset_dirs("fajr-adhan")
     filler_sets = chunkset_dirs("filler")
     starters = starter_dirs()
     events = sch.irish_prayer_events(now)
@@ -221,6 +378,12 @@ def tick():
     changed = False
 
     slots = archive_slots()
+
+    def adhan_pool(prayer):
+        """(pool, state_index_key): Fajr uses its own pool when available."""
+        if prayer == "fajr" and fajr_adhan_sets:
+            return fajr_adhan_sets, "fajr_adhan_idx"
+        return adhan_sets, "adhan_idx"
 
     def grid_anchor(c):
         """Archive grid point at or just before content time c."""
@@ -235,11 +398,12 @@ def tick():
         return os.path.join(ARCHIVE, earlier[-1][1]) if earlier else None
 
     def event_span(prayer):
-        if not adhan_sets:
+        pool, idxkey = adhan_pool(prayer)
+        if not pool:
             return 0.0
-        i = state.get("adhan_idx", 0) % len(adhan_sets)
+        i = state.get(idxkey, 0) % len(pool)
         sp = len(chunk_segments(starters[prayer])) * SEG if prayer in starters else 0
-        return sp + len(chunk_segments(adhan_sets[i])) * SEG
+        return sp + len(chunk_segments(pool[i])) * SEG
 
     # --- Irish Adhan events (with prayer starters) ---
     for start, prayer in events:
@@ -250,8 +414,9 @@ def tick():
             continue
         if not adhan_sets or not slots:
             continue
-        idx = state.get("adhan_idx", 0) % len(adhan_sets)
-        achunks = chunk_segments(adhan_sets[idx])
+        pool, idxkey = adhan_pool(prayer)
+        idx = state.get(idxkey, 0) % len(pool)
+        achunks = chunk_segments(pool[idx])
         if not achunks:
             continue
         schunks = chunk_segments(starters[prayer]) if prayer in starters else []
@@ -289,9 +454,10 @@ def tick():
         runs.append(run)
         durs_all.update(d)
         done[key] = run
-        state["adhan_idx"] = (idx + 1) % len(adhan_sets)
+        state[idxkey] = (idx + 1) % len(pool)
         changed = True
-        log(f"irish@{int(start)}: adhan-{idx} spliced into slots {run[0]}..{run[1]}")
+        src = "fajr-" if idxkey == "fajr_adhan_idx" else ""
+        log(f"irish@{int(start)}: {src}adhan-{idx} spliced into slots {run[0]}..{run[1]}")
 
     # --- Cairo Adhan suppression windows ---
     for w in wins:

@@ -20,7 +20,7 @@ segment files**; trust the code and this file over the README.
 
 | Service | Image/build | Role |
 |---|---|---|
-| `recorder` | `./recorder` (ffmpeg:6.1-alpine + curl) | Pulls `STREAM_URL` via `curl` piped into ffmpeg; writes 10 s AAC `.ts` segments named by UTC timestamp (`%Y%m%d%H%M%S.ts`) + `index.m3u8` into `/archive` (= `./data/archive`). Rolling window `ARCHIVE_HOURS`. Auto-reconnects. flock-guarded so only one recorder writes. |
+| `recorder` | `./recorder` (ffmpeg:6.1-alpine + python3) | `feed.py` pulls `STREAM_URL` and pipes de-duplicated MP3 frames into one long-lived ffmpeg; writes 10 s AAC `.ts` segments named by UTC timestamp (`%Y%m%d%H%M%S.ts`) + `index.m3u8` into `/archive` (= `./data/archive`). Rolling window `ARCHIVE_HOURS`. Auto-reconnects. flock-guarded so only one recorder writes. |
 | `scheduler` | `./scheduler` | Rebuilds `/live/delayed.m3u8` every `LOOP_SECONDS` (2.5 s) from archive segments recorded exactly `DELAY_SECONDS` ago. Also pre-chunks adhan/filler/starter audio into whole-slot HLS chunksets under `/live-static` (in `data/static/`). Only emits a continuous archive sequence — no discontinuities. |
 | `splicer` | `./scheduler` image, entrypoint `python3 /splice.py` | **The content-injection mechanism.** ~60 s before spliced content airs, it *overwrites the archive `.ts` segment files* inside the delayed window with adhan/filler/starter chunks (byte-for-byte, same filenames), PTS-aligned so timestamps stay continuous. Playlist never changes. |
 | `web` | nginx:1.27-alpine | Serves `/live/delayed.m3u8` (no-store, CORS `*`), `/archive/*.ts` and `/live-static/*` (immutable cache), and the player page `/` (hls.js + Irish clock) on port **8080**. |
@@ -94,8 +94,12 @@ STREAM_URL ──curl──> ffmpeg ──> data/archive/YYYYMMDDHHMMSS.ts (+ in
 - **Exactly one recorder** may run (flock guards it, but stale duplicate
   containers can reappear after a Docker daemon restart due to
   `restart: unless-stopped` — `docker rm -f` extras; doubled audio is the symptom).
-- Recorder uses `curl | ffmpeg` on purpose: piping prevents ffmpeg's MP3 demuxer
-  from seeking back after a stall and duplicating audio.
+- Recorder uses `feed.py | ffmpeg` on purpose. The radio replays the last
+  ~5.5 s (byte-identical MP3 frames) on every connect; `feed.py` finds the new
+  connection's first 4 KB in the tail it already sent and skips the overlap,
+  so reconnects neither repeat audio nor restart ffmpeg (continuous PTS and
+  segment cadence). During outages it feeds real-time silent MP3 frames after
+  a 3 s grace, so segments keep coming.
 - `data/` is gitignored. If deleted while containers run, recreate them with
   `docker compose up -d --force-recreate` (bind mounts).
 - The stream only exists after the recorder has run for `DELAY_SECONDS`.
@@ -104,6 +108,15 @@ STREAM_URL ──curl──> ffmpeg ──> data/archive/YYYYMMDDHHMMSS.ts (+ in
 - `adhans-raw/` (raw harvested cuts) is gitignored; `adhans/` and `fillers/`
   mp3s are committed (`.gitignore` has `*.mp3` but the committed ones are
   force-added — check `git ls-files` before assuming).
+- `EXT-X-MEDIA-SEQUENCE` must step by exactly 1 per segment (iOS AVPlayer /
+  ExoPlayer track position by it). `scheduler.media_sequence` assigns numbers
+  when names first enter the playlist, persisted in `live/.media-seq.json`.
+  Never derive it from timestamps.
+- Splicer finds slots by listing the archive dir, never `index.m3u8` (the
+  index restarts empty with the recorder). The healer only fills holes that
+  have not aired yet, never overlapping the next real segment; the splicer
+  prunes archive files by *name* timestamp (`ARCHIVE_HOURS` + 30 min) because
+  rewritten files have fresh mtimes.
 - Hidden state files in `schedule/`: `.splice-runs.json`, `.splice-durs.json`,
   `.splicer-state.json`, `.scheduler-state.json`, `cairo-times.json`.
 - **ffprobe csv quirk**: `-of csv=p=0 -show_entries packet=pts` emits trailing

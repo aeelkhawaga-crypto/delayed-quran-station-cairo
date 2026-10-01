@@ -23,6 +23,7 @@ ARCHIVE = os.environ.get("ARCHIVE_DIR", "/archive")
 LIVE = os.environ.get("LIVE_DIR", "/live")
 STATIC = os.environ.get("STATIC_DIR", "/live-static")
 ADHANS = os.environ.get("ADHAN_DIR", "/adhans")
+FAJR_ADHANS = os.environ.get("FAJR_ADHAN_DIR", "/adhans-fajr")
 FILLERS = os.environ.get("FILLER_DIR", "/fillers")
 STARTERS = os.environ.get("STARTER_DIR", "/starters")
 SCHED = os.environ.get("SCHEDULE_DIR", "/schedule")
@@ -330,10 +331,11 @@ def retimed_chunk(f, sdir):
                           capture_output=True, text=True)
 
 def ensure_chunksets():
-    """(Re)chunk adhan/filler audio into static HLS segment sets on change."""
+    """(Re)chunk adhan/fajr-adhan/filler audio into static HLS segment sets on change."""
     os.makedirs(STATIC, exist_ok=True)
     sets = {}
-    for kind, folder in (("adhan", ADHANS), ("filler", FILLERS)):
+    for kind, folder in (("adhan", ADHANS), ("fajr-adhan", FAJR_ADHANS),
+                         ("filler", FILLERS)):
         try:
             files, sig = folder_sig(folder)
         except Exception:
@@ -343,8 +345,8 @@ def ensure_chunksets():
             old = open(tag).read()
         except Exception:
             old = None
-        if sig == old and glob.glob(os.path.join(STATIC, f"{kind}-*")):
-            sets[kind] = sorted(glob.glob(os.path.join(STATIC, f"{kind}-*")))
+        if sig == old and (not files or glob.glob(os.path.join(STATIC, f"{kind}-*"))):
+            sets[kind] = sorted(glob.glob(os.path.join(STATIC, f"{kind}-*"))) if files else []
             continue
         for d in glob.glob(os.path.join(STATIC, f"{kind}-*")):
             shutil.rmtree(d, ignore_errors=True)
@@ -414,17 +416,33 @@ def load_chunkset(sdir):
 
 # ---------------- archive (delayed mode) ----------------
 
-def delayed_entries(target_ts):
-    """Archive segments whose filename timestamps fall near target_ts."""
-    target = datetime.datetime.fromtimestamp(target_ts, UTC)
-    high, low = fmt(target), fmt(target - datetime.timedelta(seconds=3 * SEG))
+PLAYLIST_MAX = 8   # segments per emitted playlist (~80s of buffer)
+
+
+def archive_names():
+    """[(ts, name)] of well-formed archive segments, sorted by timestamp.
+
+    Reads the archive directory (not the recorder's index.m3u8): the index
+    only lists the recorder's own files and truncates when the recorder
+    restarts, while healed gap-fill segments exist only on disk."""
+    out = []
+    for f in glob.glob(os.path.join(ARCHIVE, "*.ts")):
+        b = os.path.basename(f)
+        m = re.fullmatch(r"(\d{14})\.ts", b)
+        if m:
+            dt = datetime.datetime.strptime(m.group(1), "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+            out.append((int(dt.timestamp()), b))
+    return sorted(out)
+
+
+def index_durations():
+    """{segment_name: dur_str} from the recorder index (recent window)."""
+    d = {}
     try:
         lines = open(os.path.join(ARCHIVE, "index.m3u8")).read().splitlines()
     except Exception:
-        return None
-    if not lines or not lines[0].startswith("#EXTM3U"):
-        return None
-    entries, dur = [], None
+        return d
+    dur = None
     for line in lines:
         if line.startswith("#EXTINF:"):
             dur = line[len("#EXTINF:"):].rstrip().rstrip(",")
@@ -432,11 +450,24 @@ def delayed_entries(target_ts):
             continue
         else:
             b = os.path.basename(line.strip())
-            m = re.fullmatch(r"(\d{14})\.ts", b)
-            if m and low <= m.group(1) <= high:
-                entries.append((dur or str(SEG), f"/archive/{b}"))
+            if re.fullmatch(r"\d{14}\.ts", b) and dur is not None:
+                d[b] = dur
             dur = None
-    return entries
+    return d
+
+
+def delayed_entries(target_ts):
+    """Sliding window over archive names: the last PLAYLIST_MAX segments
+    with name-ts <= target_ts, oldest first.
+
+    The window's front edge anchors on the newest AVAILABLE name, not on
+    target_ts, and reaches back PLAYLIST_MAX segments — so sparse names
+    (upstream bursts/stalls, healed fills) shrink the playlist only when
+    fewer than PLAYLIST_MAX segments exist at all, never to one fresh
+    segment per tick. Returns [(ts, name)] (may be shorter than
+    PLAYLIST_MAX near the start of an archive)."""
+    avail = [(t, n) for t, n in archive_names() if t <= target_ts]
+    return avail[-PLAYLIST_MAX:]
 
 def entries_ts(entry):
     m = re.search(r"(\d{14})", entry[1])
@@ -477,6 +508,53 @@ def emit_header_only():
 # ---------------- main loop ----------------
 
 DURS_FILE = os.path.join(SCHED, ".splice-durs.json")
+SEQ_FILE = os.path.join(LIVE, ".media-seq.json")
+_emitted_key = {"k": None}   # (first_ts, last_ts) of the last emitted playlist
+_seq = {"map": None}         # segment name -> media sequence number
+
+def media_sequence(names):
+    """EXT-X-MEDIA-SEQUENCE for a playlist of `names` (oldest first).
+
+    HLS requires each segment to keep one sequence number and consecutive
+    segments to differ by exactly 1; native players (iOS AVPlayer,
+    ExoPlayer) track their position by it. Each name gets the next number
+    the first time it enters the playlist; the map is persisted so a
+    scheduler restart continues the count. A fresh map is seeded from the
+    first segment's epoch, which stays above the old epoch-based numbering."""
+    m = _seq["map"]
+    if m is None:
+        try:
+            m = {k: int(v) for k, v in json.load(open(SEQ_FILE)).get("map", {}).items()}
+        except Exception:
+            m = {}
+    nxt = max(m.values()) + 1 if m else None
+    if nxt is None:
+        ts = re.search(r"(\d{14})", names[0]).group(1)
+        nxt = int(datetime.datetime.strptime(ts, "%Y%m%d%H%M%S")
+                  .replace(tzinfo=UTC).timestamp())
+    for n in names:
+        if n not in m:
+            m[n] = nxt
+            nxt += 1
+    first = m[names[0]]
+    if any(m[n] != first + i for i, n in enumerate(names)):
+        # a name appeared between already-numbered ones (should not happen:
+        # names are final long before they air). Renumber forward so no
+        # number is ever reused for a different segment.
+        log(f"media sequence: out-of-order segment near {names[0]} — renumbering")
+        base = max(m.values()) + 1
+        for i, n in enumerate(names):
+            m[n] = base + i
+        first = base
+    _seq["map"] = m = {n: s for n, s in m.items() if s >= first}
+    try:
+        tmp = SEQ_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"map": m}, f)
+        os.replace(tmp, SEQ_FILE)
+    except Exception as e:
+        log(f"media sequence save failed: {e}")
+    return first
 
 def splice_durs():
     """True durations {segment_name: dur} for spliced slots, from the splicer."""
@@ -499,14 +577,17 @@ def tick():
     # across spliced/recorder segments, so a plain content change is safe.
     entries = delayed_entries(now - get_config()["delay"])
     if not entries:
-        emit_header_only()
+        emit_header_only()   # nothing available yet: keep previous playlist
         return
+    key = (entries[0][0], entries[-1][0])
+    if key == _emitted_key.get("k"):   # unchanged window: don't rewrite
+        return
+    _emitted_key["k"] = key
     durs = splice_durs()
-    items = []
-    for e in entries:
-        name = os.path.basename(e[1])
-        items.append((durs.get(name, e[0]), e[1]))
-    emit(int(entries_ts(entries[0])), items)
+    idurs = index_durations()
+    items = [(durs.get(n, idurs.get(n, f"{SEG}.000000")), f"/archive/{n}")
+             for _, n in entries]
+    emit(media_sequence([n for _, n in entries]), items)
 
 def main():
     log(f"starting: delay={DELAY}s seg={SEG}s")
