@@ -350,6 +350,11 @@ def _safe_name(name):
     return stem[:100] + ext.lower()
 
 
+def _irish_hm(epoch):
+    off = sch.dublin_offset(datetime.datetime.fromtimestamp(epoch, UTC))
+    return iso_local(epoch, off)[11:16]
+
+
 def media_busy(kind, now):
     """Reason string if a splice using this kind is due soon, else None."""
     st = load_splicer_state()
@@ -358,12 +363,12 @@ def media_busy(kind, now):
         for w in sch.cairo_windows(now):
             due = w["start"] - sch.SPLICE_LEAD
             if f"cairo-{int(w['start'])}" not in done and now - 30 <= due <= now + GUARD_S:
-                return f"Cairo {w['name']} filler is spliced at {iso_local(due, 0)[11:16]} UTC"
+                return f"Cairo {w['name']} filler is spliced at {_irish_hm(due)} Irish time"
     else:
         for start, prayer in sch.irish_prayer_events(now):
             due = start - sch.SPLICE_LEAD
             if f"irish-{int(start)}" not in done and now - 30 <= due <= now + GUARD_S:
-                return f"{(prayer or 'an').title()} adhan is spliced at {iso_local(due, 0)[11:16]} UTC"
+                return f"{(prayer or 'an').title()} adhan is spliced at {_irish_hm(due)} Irish time"
     return None
 
 

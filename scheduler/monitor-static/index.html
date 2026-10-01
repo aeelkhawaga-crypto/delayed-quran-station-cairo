@@ -82,13 +82,13 @@
   <span class="clock">Dublin <b id="ck-dub">—</b></span>
   <span class="clock">Cairo <b id="ck-cai">—</b></span>
   <span class="clock">UTC <b id="ck-utc">—</b></span>
-  <span class="clock">Airing (UTC) <b id="ck-air">—</b></span>
+  <span class="clock">On air: Cairo's <b id="ck-air">—</b> broadcast</span>
 </header>
 <main>
   <div class="cards" id="cards"></div>
 
   <div class="panel">
-    <h2>Archive timeline — click anywhere to listen (left of the dashed line has aired; right of it is saved and will air over the next ~<span id="tl-ahead">2</span>h)</h2>
+    <h2>Archive timeline in Irish time — click to listen, drag to select (left of the dashed line has aired; right of it is saved and airs over the next ~<span id="tl-ahead">2</span>h)</h2>
     <div class="tl-wrap">
       <canvas id="timeline"></canvas>
       <div id="hover"></div>
@@ -121,9 +121,9 @@
   </div>
 
   <div class="panel">
-    <h2>Coming up — already saved (air times are Dublin)</h2>
+    <h2>Coming up — already saved (Irish time)</h2>
     <table id="tbl-coming"><thead><tr>
-      <th>Airs (Dublin)</th><th>In</th><th>Content (UTC)</th><th>What</th><th>Length</th><th></th>
+      <th>Airs (Irish time)</th><th>In</th><th>Until</th><th>What</th><th>Length</th><th></th>
     </tr></thead><tbody></tbody></table>
   </div>
 
@@ -152,7 +152,7 @@
   <div class="panel">
     <h2>Splice schedule — next hours (wall time vs delayed content time)</h2>
     <table id="tbl-events"><thead><tr>
-      <th>Wall (UTC)</th><th>Content slot (UTC)</th><th>Type</th><th>Prayer</th>
+      <th>Airs (Irish time)</th><th>Window ends</th><th>Type</th><th>Prayer</th>
       <th>Status</th><th>Adhan file that rotates in</th>
     </tr></thead><tbody></tbody></table>
   </div>
