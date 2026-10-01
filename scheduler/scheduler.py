@@ -456,7 +456,53 @@ def emit_header_only():
 # ---------------- main loop ----------------
 
 DURS_FILE = os.path.join(SCHED, ".splice-durs.json")
+SEQ_FILE = os.path.join(LIVE, ".media-seq.json")
 _emitted_key = {"k": None}   # (first_ts, last_ts) of the last emitted playlist
+_seq = {"map": None}         # segment name -> media sequence number
+
+def media_sequence(names):
+    """EXT-X-MEDIA-SEQUENCE for a playlist of `names` (oldest first).
+
+    HLS requires each segment to keep one sequence number and consecutive
+    segments to differ by exactly 1; native players (iOS AVPlayer,
+    ExoPlayer) track their position by it. Each name gets the next number
+    the first time it enters the playlist; the map is persisted so a
+    scheduler restart continues the count. A fresh map is seeded from the
+    first segment's epoch, which stays above the old epoch-based numbering."""
+    m = _seq["map"]
+    if m is None:
+        try:
+            m = {k: int(v) for k, v in json.load(open(SEQ_FILE)).get("map", {}).items()}
+        except Exception:
+            m = {}
+    nxt = max(m.values()) + 1 if m else None
+    if nxt is None:
+        ts = re.search(r"(\d{14})", names[0]).group(1)
+        nxt = int(datetime.datetime.strptime(ts, "%Y%m%d%H%M%S")
+                  .replace(tzinfo=UTC).timestamp())
+    for n in names:
+        if n not in m:
+            m[n] = nxt
+            nxt += 1
+    first = m[names[0]]
+    if any(m[n] != first + i for i, n in enumerate(names)):
+        # a name appeared between already-numbered ones (should not happen:
+        # names are final long before they air). Renumber forward so no
+        # number is ever reused for a different segment.
+        log(f"media sequence: out-of-order segment near {names[0]} — renumbering")
+        base = max(m.values()) + 1
+        for i, n in enumerate(names):
+            m[n] = base + i
+        first = base
+    _seq["map"] = m = {n: s for n, s in m.items() if s >= first}
+    try:
+        tmp = SEQ_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"map": m}, f)
+        os.replace(tmp, SEQ_FILE)
+    except Exception as e:
+        log(f"media sequence save failed: {e}")
+    return first
 
 def splice_durs():
     """True durations {segment_name: dur} for spliced slots, from the splicer."""
@@ -489,7 +535,7 @@ def tick():
     idurs = index_durations()
     items = [(durs.get(n, idurs.get(n, f"{SEG}.000000")), f"/archive/{n}")
              for _, n in entries]
-    emit(int(entries[0][0]), items)
+    emit(media_sequence([n for _, n in entries]), items)
 
 def main():
     log(f"starting: delay={DELAY}s seg={SEG}s")

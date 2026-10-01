@@ -207,17 +207,22 @@ def flatten(sets, start_idx):
 
 
 # ---------------- archive gap healing ----------------
-# The upstream radio stream sometimes stalls (or the recorder restarts), so
-# archive segment names stop for a while. The delayed playlist consumes
-# names with a cursor (see scheduler.delayed_entries), which would freeze
-# on a hole. This healer synthesizes filler segments at missing slots —
-# filler audio if available, silence otherwise — so the delayed stream
-# always has continuous material. Segment names are final once
-# HEAL_MIN_AGE old (new names are close-times and monotonic), so only
-# slots at least that old are ever filled.
+# The recorder feeds real-time silence through upstream outages, so holes
+# in the archive now only appear when the recorder itself restarts or dies.
+# The delayed playlist would freeze on such a hole, so this healer
+# synthesizes filler segments there (filler audio if available, silence
+# otherwise). Rules that keep it from fighting the rest of the system:
+# - only slots that have not aired yet (newer than now - DELAY + LEAD) are
+#   filled; older holes are history, and refilling them is what kept
+#   resurrecting deleted segments in a loop;
+# - a fill never overlaps the next real segment (g + SEG <= next name);
+# - one hole per tick, PTS-chained from the segment right before it;
+# - names are final once HEAL_MIN_AGE old, so only slots that old are filled.
 
 HEAL_MIN_AGE = 120.0
 FILL_MAX = 12   # max slots healed per tick (bounds CPU after a long outage)
+KEEP_SECONDS = int(float(os.environ.get("ARCHIVE_HOURS", "4")) * 3600) + 1800
+PRUNE_EVERY = 300.0
 
 
 def dir_slots():
@@ -259,27 +264,32 @@ def fill_pool():
 
 
 def heal_archive_gaps(now):
-    """Fill missing archive slots (holes > SEG, and forward past the newest
-    name while the recorder is stalled) with synthesized filler segments,
-    PTS-chained from the previous segment."""
+    """Fill missing not-yet-aired archive slots (one hole per tick, and
+    forward past the newest name while the recorder is down) with
+    synthesized filler segments, PTS-chained from the previous segment."""
     slots = dir_slots()
     if not slots:
         return
     have = {t for t, _ in slots}
     limit = now - HEAL_MIN_AGE
+    floor = now - DELAY + LEAD          # slots before this have (nearly) aired
     missing = []
     prev = None
     for ts, _ in slots:
-        if prev is not None and ts - prev > SEG + 2:
+        if prev is not None and ts - prev >= 2 * SEG and ts > floor:
             g = prev + SEG
-            while g < ts - 2 and g <= limit and g not in have:
-                missing.append(g)
+            while g + SEG <= ts and g <= limit:
+                if g > floor and g not in have:
+                    missing.append(g)
                 g += SEG
+            if missing:
+                break                   # one hole per tick: one PTS chain
         prev = ts
-    if slots[-1][0] < limit:            # recorder stalled/dead: fill forward
+    if not missing and slots[-1][0] < limit:   # recorder stalled/dead
         g = slots[-1][0] + SEG
-        while g <= limit and g not in have:
-            missing.append(g)
+        while g <= limit:
+            if g > floor and g not in have:
+                missing.append(g)
             g += SEG
     if not missing:
         return
@@ -324,8 +334,34 @@ def heal_archive_gaps(now):
         log(f"heal: filled {made} slot(s) {t0:%H:%M:%S}..{t1:%H:%M:%S} UTC")
 
 
+def prune_archive(now):
+    """Delete archive files whose NAME is older than the retention window.
+
+    The recorder's own cleanup goes by mtime, which never catches files the
+    splicer rewrote (spliced/healed slots get a fresh mtime)."""
+    if now - state.get("pruned_at", 0) < PRUNE_EVERY:
+        return
+    state["pruned_at"] = now
+    cutoff = now - KEEP_SECONDS
+    n = 0
+    for b in os.listdir(ARCHIVE):
+        m = re.fullmatch(r"\.?(\d{14})(\.ts)?(\.tmp)?", b)
+        if not m:
+            continue
+        ts = datetime.datetime.strptime(m.group(1), "%Y%m%d%H%M%S").replace(tzinfo=UTC).timestamp()
+        if ts < cutoff:
+            try:
+                os.remove(os.path.join(ARCHIVE, b))
+                n += 1
+            except OSError:
+                pass
+    if n:
+        log(f"prune: removed {n} archive file(s) older than {KEEP_SECONDS // 3600}h")
+
+
 def tick():
     now = time.time()
+    prune_archive(now)
     heal_archive_gaps(now)
     adhan_sets = chunkset_dirs("adhan")
     fajr_adhan_sets = chunkset_dirs("fajr-adhan")

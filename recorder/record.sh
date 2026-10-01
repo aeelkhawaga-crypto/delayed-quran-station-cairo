@@ -1,9 +1,11 @@
 #!/bin/sh
 # Records STREAM_URL into a rolling HLS archive in /archive, forever.
 #
-# - Network sources are pulled with curl through a pipe: a byte stream
-#   cannot seek back, which avoids the mp3 demuxer's resync behaviour
-#   that can briefly duplicate audio when reading http directly.
+# - Network sources are pulled by feed.py through a pipe into ONE
+#   long-lived ffmpeg: it reconnects on its own, drops the ~5 s of audio
+#   the radio replays on every connect, and feeds real-time silence
+#   during outages. ffmpeg therefore never restarts on a network blip,
+#   so timestamps and segment cadence stay continuous.
 # - Segments are named by UTC timestamp (%Y%m%d%H%M%S); the timeshift
 #   service uses those names to serve segments from DELAY_SECONDS ago.
 # - The HLS muxer writes index.m3u8 with exact segment durations and
@@ -53,10 +55,9 @@ case "$STREAM_URL" in
     *)
         echo "[recorder] connecting: $STREAM_URL"
         while true; do
-            curl -sL --retry 5 --retry-delay 5 --retry-all-errors \
-                 -H "Icy-MetaData: 0" "$STREAM_URL" |
-            run_ffmpeg -i pipe:0
-            echo "[recorder] stream ended ($?), reconnecting in 3s"
+            python3 -u /feed.py "$STREAM_URL" |
+            run_ffmpeg -f mp3 -i pipe:0
+            echo "[recorder] ffmpeg exited ($?), restarting in 3s"
             sleep 3
         done
         ;;

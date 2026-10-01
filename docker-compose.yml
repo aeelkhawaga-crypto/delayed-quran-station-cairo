@@ -7,6 +7,7 @@ services:
       TZ: UTC
     volumes:
       - ./recorder/record.sh:/record.sh:ro
+      - ./recorder/feed.py:/feed.py:ro
       - ./data/archive:/archive
     entrypoint: ["/bin/sh", "/record.sh"]
     logging:
