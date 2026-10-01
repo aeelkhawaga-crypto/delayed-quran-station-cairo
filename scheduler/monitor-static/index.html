@@ -32,7 +32,7 @@
            padding:.8rem; margin-bottom:1rem; }
   .panel h2 { margin:0 0 .6rem; font-size:.85rem; color:var(--dim);
               text-transform:uppercase; letter-spacing:.05em; }
-  #timeline { width:100%; height:110px; display:block; cursor:crosshair;
+  #timeline { width:100%; height:110px; display:block; cursor:crosshair; touch-action:none;
               border-radius:4px; background:#0a111b; }
   .legend { display:flex; gap:1rem; flex-wrap:wrap; margin-top:.5rem;
             font-size:.75rem; color:var(--dim); }
@@ -89,6 +89,16 @@
       <span><i style="background:var(--starter)"></i>Prayer starter</span>
       <span><i style="background:var(--healed)"></i>Healed gap (filler)</span>
     </div>
+    <div id="selbar" style="margin-top:.6rem; padding:.5rem .7rem;
+         border:1px solid var(--line); border-radius:6px; background:#0d1a29;
+         display:none; gap:.6rem; align-items:center; flex-wrap:wrap">
+      <span id="sel-txt"></span>
+      <button id="btn-sel-play">▶ Play selection</button>
+      <a id="btn-sel-dl" href="#" download><button type="button">⬇ Download</button></a>
+      <button id="btn-sel-clear">✕ Clear</button>
+      <span id="sel-note" class="dim"></span>
+    </div>
+    <div class="dim" style="font-size:.75rem; margin-top:.35rem">Tip: drag across the timeline to select a range to play or download.</div>
     <div id="playbar" style="margin-top:.7rem">
       <button id="btn-play">▶ Play</button>
       <button id="btn-live" class="on">Live</button>

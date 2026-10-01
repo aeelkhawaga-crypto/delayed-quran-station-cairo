@@ -21,7 +21,9 @@ import os, sys, json, time, queue, threading, urllib.request
 
 URL = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("STREAM_URL", "")
 READ_TIMEOUT = float(os.environ.get("FEED_READ_TIMEOUT", "15"))
-SILENCE_GRACE = float(os.environ.get("FEED_SILENCE_GRACE", "3"))
+# The radio replays ~5.5 s on reconnect, so a drop shorter than that loses
+# nothing; waiting past it before feeding silence avoids needless silence.
+SILENCE_GRACE = float(os.environ.get("FEED_SILENCE_GRACE", "8"))
 TAIL_BYTES = 512 * 1024    # ~55 s of forwarded stream kept for de-duplication
 PROBE_BYTES = 4096         # first bytes of a new connection looked up in the tail
 STATUS_FILE = os.environ.get("FEED_STATUS_FILE", "/archive/.feeder.json")

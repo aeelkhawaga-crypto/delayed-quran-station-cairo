@@ -216,10 +216,15 @@ def flatten(sets, start_idx):
 #   filled; older holes are history, and refilling them is what kept
 #   resurrecting deleted segments in a loop;
 # - a fill never overlaps the next real segment (g + SEG <= next name);
+# - holes shorter than HEAL_MIN_GAP (30 s) are skipped, not filled;
 # - one hole per tick, PTS-chained from the segment right before it;
 # - names are final once HEAL_MIN_AGE old, so only slots that old are filled.
 
 HEAL_MIN_AGE = 120.0
+# Holes shorter than this are left alone: the delayed stream just skips a
+# few seconds (absorbed by the players' ~30 s buffer), which sounds better
+# than splicing in 10 s of a different reciter.
+HEAL_MIN_GAP = float(os.environ.get("HEAL_MIN_GAP_SECONDS", "30"))
 FILL_MAX = 12   # max slots healed per tick (bounds CPU after a long outage)
 KEEP_SECONDS = int(float(os.environ.get("ARCHIVE_HOURS", "4")) * 3600) + 1800
 PRUNE_EVERY = 300.0
@@ -276,7 +281,7 @@ def heal_archive_gaps(now):
     missing = []
     prev = None
     for ts, _ in slots:
-        if prev is not None and ts - prev >= 2 * SEG and ts > floor:
+        if prev is not None and ts - prev - SEG >= max(HEAL_MIN_GAP, SEG) and ts > floor:
             g = prev + SEG
             while g + SEG <= ts and g <= limit:
                 if g > floor and g not in have:

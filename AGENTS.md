@@ -99,7 +99,8 @@ STREAM_URL ──curl──> ffmpeg ──> data/archive/YYYYMMDDHHMMSS.ts (+ in
   connection's first 4 KB in the tail it already sent and skips the overlap,
   so reconnects neither repeat audio nor restart ffmpeg (continuous PTS and
   segment cadence). During outages it feeds real-time silent MP3 frames after
-  a 3 s grace, so segments keep coming.
+  an 8 s grace (a shorter drop is fully recovered from the replay), so
+  segments keep coming. The healer skips holes under 30 s (HEAL_MIN_GAP_SECONDS).
 - `data/` is gitignored. If deleted while containers run, recreate them with
   `docker compose up -d --force-recreate` (bind mounts).
 - The stream only exists after the recorder has run for `DELAY_SECONDS`.
