@@ -91,6 +91,10 @@ STREAM_URL ──curl──> ffmpeg ──> data/archive/YYYYMMDDHHMMSS.ts (+ in
 
 - **Always `docker compose up -d` after editing `.env`** — `restart` does not
   re-read it.
+- After `nginx/nginx.conf` changes arrive via git, run
+  `docker compose up -d --force-recreate web`: git replaces the file (new inode)
+  and the container's single-file bind mount keeps the old one, so
+  `nginx -s reload` silently re-reads the stale config.
 - **Exactly one recorder** may run (flock guards it, but stale duplicate
   containers can reappear after a Docker daemon restart due to
   `restart: unless-stopped` — `docker rm -f` extras; doubled audio is the symptom).
