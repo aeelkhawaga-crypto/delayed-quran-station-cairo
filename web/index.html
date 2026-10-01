@@ -4,6 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Quran Radio — Live for Ireland</title>
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-GMXJQKFDDW"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-GMXJQKFDDW');
+</script>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <style>
   body {
@@ -44,6 +53,23 @@
 
   function setStatus(msg) { status.textContent = msg; }
 
+  // Analytics events: listening time and stream health, not just page views
+  const track = (name, params) => { try { gtag('event', name, params || {}); } catch (e) {} };
+  const player = Hls.isSupported() ? 'hls.js' : 'native';
+  let listenTimer = null, lastProblem = 0;
+  function problem(kind) {
+    if (Date.now() - lastProblem < 60000) return;     // at most one per minute
+    lastProblem = Date.now();
+    track('stream_problem', { kind, player });
+  }
+  audio.addEventListener('playing', () => {
+    if (!listenTimer) listenTimer = setInterval(() => track('listening', { minutes: 5, player }), 300000);
+  });
+  audio.addEventListener('pause', () => { clearInterval(listenTimer); listenTimer = null; });
+  audio.addEventListener('stalled', () => problem('stalled'));
+  audio.addEventListener('waiting', () => { if (!audio.paused) problem('buffering'); });
+  audio.addEventListener('error', () => problem('media_error'));
+
   if (Hls.isSupported()) {
     const hls = new Hls({ liveSyncDurationCount: 3 });
     hls.loadSource(playlist);
@@ -51,6 +77,7 @@
     hls.on(Hls.Events.MANIFEST_PARSED, () => { btn.disabled = false; btn.textContent = '▶ Play'; });
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (!data.fatal) return;
+      problem('hls_' + data.type);
       setStatus('Connection issue — retrying…');
       if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
         hls.recoverMediaError();
@@ -70,10 +97,12 @@
   btn.addEventListener('click', () => {
     if (audio.paused) {
       audio.play();
+      track('play', { player });
       btn.textContent = '❚❚ Pause';
       setStatus('Listening — this stream is 2 hours behind Cairo.');
     } else {
       audio.pause();
+      track('pause', { player });
       btn.textContent = '▶ Play';
       setStatus('');
     }
