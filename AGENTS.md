@@ -146,6 +146,18 @@ STREAM_URL ──curl──> ffmpeg ──> data/archive/YYYYMMDDHHMMSS.ts (+ in
 - `web/index.html` — hls.js player, `liveSyncDurationCount: 3`.
 - `nginx/nginx.conf` — caching/CORS rules per location.
 
+## Monitor (read-only, password-protected)
+
+`/monitor/` on the web port: nginx `auth_basic` (`monitor.htpasswd` in the repo
+root on the server, gitignored — create it before `docker compose up`, or
+Docker mounts an empty directory) proxied to `scheduler/monitor.py`, a
+thread in the scheduler container (port 8001). Health cards (source feed via
+`archive/.feeder.json`, recorder, playlist, splicer heartbeat, watchdog via
+`schedule/.watchdog.json`, disk), a 4.5 h archive timeline and a "coming up"
+list of the saved-but-not-aired content (adhan / starter / Cairo filler /
+healed), each listenable via `/monitor/api/listen.m3u8`. Healed segments are
+detected by mtime lag (> 90 s after their name time), not by the recorder index.
+
 ## Common operations
 
 ```sh

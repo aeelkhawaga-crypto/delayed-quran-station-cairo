@@ -539,6 +539,11 @@ def tick():
 
 def main():
     log(f"starting: delay={DELAY}s seg={SEG}s")
+    try:
+        import monitor
+        monitor.start()
+    except Exception as e:
+        log(f"monitor API failed to start: {e}")
     while True:
         try:
             tick()
