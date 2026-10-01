@@ -11,6 +11,9 @@ const KIND_LABEL = { quran: "Quran", "dublin-adhan": "Dublin adhan",
 let TL = null;            // last timeline payload
 let seekTs = null;        // where the player is pointed (content ts)
 let playBase = null;      // content ts of the first segment in the listen playlist
+let sel = null;           // {a, b} selected content range
+let drag = null;          // in-progress pointer drag on the timeline
+let stopAt = null;        // pause when the playhead passes this (play selection)
 let playing = false;
 let hls = null;
 
@@ -189,6 +192,17 @@ function drawTimeline() {
   ctx.fillStyle = "#fff";
   ctx.textAlign = ax > W - 60 ? "right" : "left";
   ctx.fillText("airing", ax + (ax > W - 60 ? -3 : 3), 9);
+  // selection
+  const S = drag && drag.moved ? { a: Math.min(drag.t0, drag.t1), b: Math.max(drag.t0, drag.t1) } : sel;
+  if (S) {
+    ctx.fillStyle = "rgba(255,255,255,0.18)";
+    ctx.fillRect(x(S.a), 0, Math.max(1, x(S.b) - x(S.a)), H);
+    ctx.strokeStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.moveTo(Math.round(x(S.a)) + 0.5, 0); ctx.lineTo(Math.round(x(S.a)) + 0.5, H);
+    ctx.moveTo(Math.round(x(S.b)) + 0.5, 0); ctx.lineTo(Math.round(x(S.b)) + 0.5, H);
+    ctx.stroke();
+  }
   // playhead: where the audio actually is
   const ph = playheadTs();
   if (ph != null && ph >= t0 && ph <= t1) {
@@ -213,9 +227,58 @@ function canvasTs(ev) {
   return t0 + fx * (t1 - t0);
 }
 
-canvas.addEventListener("click", ev => {
+canvas.addEventListener("pointerdown", ev => {
   const t = canvasTs(ev);
-  if (t != null) { seekTo(t, false); if (!playing) $("btn-play").click(); }
+  if (t == null) return;
+  drag = { x: ev.clientX, t0: t, t1: t, moved: false };
+  canvas.setPointerCapture(ev.pointerId);
+});
+canvas.addEventListener("pointermove", ev => {
+  if (!drag) return;
+  drag.t1 = clampTs(canvasTs(ev));
+  if (Math.abs(ev.clientX - drag.x) > 4) drag.moved = true;
+  if (drag.moved) drawTimeline();
+});
+canvas.addEventListener("pointerup", ev => {
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (!d.moved) {                       // a tap/click: jump there and play
+    stopAt = null;
+    seekTo(d.t0, false);
+    if (!playing) $("btn-play").click();
+    return;
+  }
+  const a = Math.min(d.t0, d.t1), b = Math.max(d.t0, d.t1);
+  sel = b - a >= TL.seg ? { a, b } : null;
+  renderSel(); drawTimeline();
+});
+canvas.addEventListener("pointercancel", () => { drag = null; drawTimeline(); });
+
+function clampTs(t) {
+  if (!TL || !TL._geom || t == null) return t;
+  return Math.max(TL._geom.t0, Math.min(TL._geom.t1, t));
+}
+
+function renderSel() {
+  const bar = $("selbar");
+  if (!sel) { bar.style.display = "none"; return; }
+  bar.style.display = "flex";
+  $("sel-txt").textContent =
+    `Selected: airs ${fmtDub(sel.a + TL.delay)} → ${fmtDub(sel.b + TL.delay)} Dublin ` +
+    `(content ${fmtE(sel.a).slice(11, 19)}–${fmtE(sel.b).slice(11, 19)} UTC) · ${fmtDur(sel.b - sel.a)}`;
+  $("btn-sel-dl").href = `/monitor/api/download?start=${Math.floor(sel.a)}&end=${Math.ceil(sel.b)}`;
+  $("sel-note").textContent = "";
+}
+
+$("btn-sel-play").addEventListener("click", () => {
+  if (!sel) return;
+  seekTo(sel.a, false);
+  stopAt = sel.b;
+  if (!playing) $("btn-play").click(); else $("audio").play().catch(() => {});
+});
+$("btn-sel-clear").addEventListener("click", () => { sel = null; stopAt = null; renderSel(); drawTimeline(); });
+$("btn-sel-dl").addEventListener("click", () => {
+  $("sel-note").textContent = "preparing file… the download starts when it is ready (longer ranges take a little while)";
 });
 canvas.addEventListener("mousemove", ev => {
   const t = canvasTs(ev);
@@ -268,6 +331,7 @@ function kindAt(ts) {
 
 function seekTo(ts, live) {
   seekTs = ts;
+  stopAt = null;                        // any jump cancels "play selection"
   // the listen playlist starts at the first segment named at/after ts
   const first = TL ? TL.segments.find(s => s[0] >= ts) : null;
   playBase = first ? first[0] : ts;
@@ -337,4 +401,11 @@ window.addEventListener("resize", drawTimeline);
 refreshOverview(); refreshTimeline();
 setInterval(refreshOverview, 10000);
 setInterval(refreshTimeline, 30000);
-setInterval(() => { drawTimeline(); updatePos(); }, 500);   // move the playhead
+setInterval(() => {                  // move the playhead; stop at selection end
+  const ph = playheadTs();
+  if (stopAt != null && ph != null && ph >= stopAt && playing) {
+    stopAt = null;
+    $("btn-play").click();
+  }
+  drawTimeline(); updatePos();
+}, 500);

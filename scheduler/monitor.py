@@ -12,6 +12,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import tempfile
 import time
 import datetime
 import threading
@@ -28,6 +30,8 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 if not os.path.isdir(STATIC_DIR):            # running from / in the container
     STATIC_DIR = "/monitor-static"
 LISTEN_MAX_MIN = 120
+DOWNLOAD_MAX_S = 5 * 3600
+_download_lock = threading.Semaphore(1)   # one export at a time (CPU/disk)
 HEALED_MIN_LAG = 90   # a file written this long after its name time was synthesized
 
 
@@ -424,40 +428,75 @@ def api_timeline(now, hours):
     return data
 
 
-def api_listen(now, start, minutes):
-    minutes = max(1, min(LISTEN_MAX_MIN, minutes or 30))
+def range_items(now, start, end):
+    """[(dur_str, uri, path)] covering content time [start, end]: the archive
+    segments, with not-yet-applied splices substituted (what will air)."""
     names = archive_names()
     if not names:
-        return None
-    later = [(t, n) for t, n in names if t >= start]
-    if later:
-        first_i = names.index(later[0])
-    else:
-        first_i = len(names) - 1
-    end = start + minutes * 60
-    picked = [(t, n) for t, n in names[first_i:] if t <= end]
-    if not picked:
-        picked = [names[first_i]]
+        return []
+    later = [i for i, (t, _) in enumerate(names) if t >= start]
+    first_i = later[0] if later else len(names) - 1
+    picked = [(t, n) for t, n in names[first_i:] if t < end] or [names[first_i]]
     idurs, _ = index_durs_names()
     sdurs = splice_durs()
     plan = planned_splices(now, names)
-    lines = ["#EXTM3U", "#EXT-X-VERSION:3", f"#EXT-X-TARGETDURATION:{sch.SEG}",
-             "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:VOD"]
-    prev_planned = False
+    out = []
     for t, n in picked:
-        planned = n in plan
-        if planned != prev_planned and len(lines) > 5:
-            lines.append("#EXT-X-DISCONTINUITY")   # preview chunks carry own PTS
-        prev_planned = planned
-        if planned:
+        if n in plan:
             d, uri = plan[n]
+            path = os.path.join(sch.STATIC, uri[len("/live-static/"):])
         else:
             d = sdurs.get(n) or idurs.get(n) or f"{sch.SEG}.000000"
-            uri = f"/archive/{n}"
+            uri, path = f"/archive/{n}", os.path.join(ARCHIVE, n)
+        out.append((d, uri, path))
+    return out
+
+
+def api_listen(now, start, minutes):
+    minutes = max(1, min(LISTEN_MAX_MIN, minutes or 30))
+    items = range_items(now, start, start + minutes * 60)
+    if not items:
+        return None
+    lines = ["#EXTM3U", "#EXT-X-VERSION:3", f"#EXT-X-TARGETDURATION:{sch.SEG}",
+             "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:VOD"]
+    prev_planned = None
+    for d, uri, _ in items:
+        planned = uri.startswith("/live-static/")
+        if prev_planned is not None and planned != prev_planned:
+            lines.append("#EXT-X-DISCONTINUITY")   # preview chunks carry own PTS
+        prev_planned = planned
         lines.append(f"#EXTINF:{d},")
         lines.append(uri)
     lines.append("#EXT-X-ENDLIST")
     return "\n".join(lines) + "\n"
+
+
+def api_download(now, start, end):
+    """Export content [start, end] as one .m4a (AAC stream copy, no
+    re-encode). Returns (path, filename) of a temp file the caller deletes."""
+    end = min(end, start + DOWNLOAD_MAX_S)
+    items = range_items(now, start, end)
+    if not items:
+        return None
+    tmpdir = tempfile.mkdtemp(prefix="quran-dl-")
+    lst = os.path.join(tmpdir, "list.txt")
+    with open(lst, "w") as f:
+        for _, _, path in items:
+            f.write("file '%s'\n" % path.replace("'", "'\\''"))
+    out = os.path.join(tmpdir, "out.m4a")
+    r = subprocess.run(["ffmpeg", "-nostdin", "-y", "-v", "error",
+                        "-f", "concat", "-safe", "0", "-i", lst,
+                        "-vn", "-c:a", "copy", "-bsf:a", "aac_adtstoasc",
+                        "-movflags", "+faststart", out],
+                       capture_output=True, text=True, timeout=600)
+    if r.returncode != 0 or not os.path.exists(out):
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise RuntimeError("export failed: " + r.stderr.strip()[:200])
+    off = sch.dublin_offset(datetime.datetime.fromtimestamp(start + sch.DELAY, UTC))
+    a = datetime.datetime.fromtimestamp(start + sch.DELAY + off, UTC)
+    b = datetime.datetime.fromtimestamp(end + sch.DELAY + off, UTC)
+    name = f"quran-radio-{a:%Y-%m-%d_%H%M}-{b:%H%M}-dublin.m4a"
+    return out, name
 
 
 # ---------------- HTTP ----------------
@@ -506,9 +545,36 @@ class Handler(BaseHTTPRequestHandler):
                 if pl is None:
                     return self._send('{"error": "archive empty"}', status=404)
                 return self._send(pl, ctype="application/vnd.apple.mpegurl")
+            if path == "/api/download":
+                start = float(q["start"][0])
+                end = float(q["end"][0])
+                if end <= start:
+                    return self._send('{"error": "empty range"}', status=400)
+                if not _download_lock.acquire(blocking=False):
+                    return self._send('{"error": "another export is running"}', status=429)
+                try:
+                    res = api_download(now, start, end)
+                finally:
+                    _download_lock.release()
+                if res is None:
+                    return self._send('{"error": "archive empty"}', status=404)
+                return self._send_file(*res)
             self._send('{"error": "not found"}', status=404)
         except Exception as e:
             self._send(json.dumps({"error": str(e)}), status=500)
+
+    def _send_file(self, path, filename):
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/mp4")
+            self.send_header("Content-Length", str(os.path.getsize(path)))
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            with open(path, "rb") as f:
+                shutil.copyfileobj(f, self.wfile, 256 * 1024)
+        finally:
+            shutil.rmtree(os.path.dirname(path), ignore_errors=True)
 
     def _static(self, name):
         safe = os.path.basename(name)
