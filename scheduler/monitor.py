@@ -498,6 +498,42 @@ def media_file_path(kind, name, trash):
     return os.path.join(folder, name)
 
 
+# ---------------- public prayer times (player page, no auth) ----------------
+
+_public_cache = {"t": 0.0, "data": None}
+
+
+def public_prayers(now):
+    """Dublin prayer times around now, and whether each adhan will play on
+    the stream. Public (no auth): exposes only the timetable."""
+    if now - _public_cache["t"] < 30 and _public_cache["data"]:
+        return _public_cache["data"]
+    st = load_splicer_state()
+    done = st.get("spliced", {}) if isinstance(st.get("spliced"), dict) else {}
+    wins = sch.cairo_windows(now)
+    has = {k: bool(glob.glob(os.path.join(sch.STATIC, f"{k}-*"))) for k in ("adhan", "fajr-adhan")}
+    off = sch.dublin_offset(datetime.datetime.fromtimestamp(now, UTC))
+    today = datetime.datetime.fromtimestamp(now + off, UTC).date()
+    rows = []
+    for start, prayer in sch.irish_prayer_events(now):
+        day = datetime.datetime.fromtimestamp(start + off, UTC).date()
+        if day < today or start > now + 30 * 3600:
+            continue
+        key = f"irish-{int(start)}"
+        if key in done:
+            plays = bool(done[key])
+        else:
+            pool = (has["fajr-adhan"] or has["adhan"]) if prayer == "fajr" else has["adhan"]
+            near = any(_gap(start - 60, start + 300, w["start"], w["end"]) <= sch.MIN_GAP
+                       for w in wins)
+            plays = bool(pool) and not near
+        rows.append({"prayer": (prayer or "adhan").title(), "time": int(start),
+                     "adhan_on_stream": plays, "today": day == today})
+    data = {"now": int(now), "prayers": rows}
+    _public_cache.update(t=now, data=data)
+    return data
+
+
 # ---------------- endpoints ----------------
 
 def api_overview(now):
@@ -748,6 +784,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._static(path[1:])
             if path == "/hls.min.js":
                 return self._static("hls.min.js")
+            if path == "/public/prayers":
+                return self._send(json.dumps(public_prayers(now)))
             if path == "/api/overview":
                 return self._send(json.dumps(api_overview(now)))
             if path == "/api/timeline":
