@@ -70,6 +70,12 @@
   footer details { margin-top:.6rem; }
   footer summary { cursor:pointer; }
   #url { word-break:break-all; display:block; margin:.4rem 0; color:#a8c0d8; }
+  #tap { position:fixed; inset:0; background:rgba(13,27,42,.88); display:none;
+         flex-direction:column; align-items:center; justify-content:center; gap:1rem;
+         z-index:10; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+  #tap .big { width:120px; height:120px; border-radius:50%; background:var(--accent);
+              display:flex; align-items:center; justify-content:center; font-size:3rem; color:#fff; }
+  #tap .txt { font-size:1.15rem; }
   #toast { position:fixed; left:50%; bottom:calc(20px + env(safe-area-inset-bottom));
            transform:translateX(-50%); background:#000d; color:#fff; padding:.5rem .9rem;
            border-radius:8px; font-size:.85rem; display:none; }
@@ -117,6 +123,7 @@
   </footer>
 </main>
 <div id="toast"></div>
+<div id="tap" role="button" aria-label="Start listening"><div class="big">▶</div><div class="txt">Tap anywhere to listen</div></div>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -163,10 +170,30 @@ function setup() {
     setStatus('Your browser cannot play this stream — use the link below in VLC.');
   }
 }
+// Opened from the home-screen icon: start playing straight away. Android
+// Chrome allows this for installed apps; iOS always requires a tap, so then
+// the whole screen becomes the play button.
+const launchedAsApp = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+let autoplayTried = false;
 function ready() {
   btn.disabled = false;
   if (!wantPlaying) btn.textContent = '▶ Play';
+  if (launchedAsApp && !autoplayTried) { autoplayTried = true; autoStart(); }
 }
+function autoStart() {
+  wantPlaying = true;
+  btn.textContent = '❚❚ Pause';
+  setStatus('Connecting…');
+  audio.play().then(() => track('autoplay', { outcome: 'played', player }))
+    .catch(() => {
+      wantPlaying = false;
+      btn.textContent = '▶ Play';
+      setStatus('');
+      $('tap').style.display = 'flex';
+      track('autoplay', { outcome: 'needs_tap', player });
+    });
+}
+$('tap').addEventListener('click', () => { $('tap').style.display = 'none'; start(); });
 
 function start() {
   wantPlaying = true;
