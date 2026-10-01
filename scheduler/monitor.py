@@ -356,12 +356,12 @@ def media_busy(kind, now):
     done = st.get("spliced", {}) if isinstance(st.get("spliced"), dict) else {}
     if kind == "filler":
         for w in sch.cairo_windows(now):
-            due = w["start"] - 60
+            due = w["start"] - sch.SPLICE_LEAD
             if f"cairo-{int(w['start'])}" not in done and now - 30 <= due <= now + GUARD_S:
                 return f"Cairo {w['name']} filler is spliced at {iso_local(due, 0)[11:16]} UTC"
     else:
         for start, prayer in sch.irish_prayer_events(now):
-            due = start - 60
+            due = start - sch.SPLICE_LEAD
             if f"irish-{int(start)}" not in done and now - 30 <= due <= now + GUARD_S:
                 return f"{(prayer or 'an').title()} adhan is spliced at {iso_local(due, 0)[11:16]} UTC"
     return None

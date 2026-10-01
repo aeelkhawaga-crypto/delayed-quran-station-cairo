@@ -106,7 +106,7 @@ function renderComing() {
   if (!runs.length) { tb.innerHTML = '<tr><td colspan="6">nothing saved ahead yet</td></tr>'; return; }
   for (const r of runs) {
     const air = r.t0 + TL.delay;
-    const what = KIND_LABEL[r.kind] + (r.pending ? ` — ${r.label}, <span class="pill pending">preview — written into the stream ~1 min before air</span>` : "");
+    const what = KIND_LABEL[r.kind] + (r.pending ? ` — ${r.label}, <span class="pill pending">preview — written into the stream ~10 min before air</span>` : "");
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${fmtDub(Math.max(air, TL.now_utc))}</td>

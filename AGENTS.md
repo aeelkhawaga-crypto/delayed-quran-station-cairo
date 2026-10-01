@@ -50,8 +50,10 @@ STREAM_URL ──curl──> ffmpeg ──> data/archive/YYYYMMDDHHMMSS.ts (+ in
   window is `[now − DELAY − 30s, now − DELAY]`.
 - An event (Irish Adhan) or suppression window (Cairo Adhan) maps to archive
   slots; `splice.py:replace_slots` copies pre-chunked segments over those files
-  `LEAD=60 s` before they air (players only fetch a slot in the ~30 s before it
-  airs, so no client holds stale bytes).
+  `SPLICE_LEAD` (600 s) before they air. The playlist reaches `PLAYLIST_AHEAD`
+  (150 s) past the broadcast point with `EXT-X-START:TIME-OFFSET=-150`, so
+  players buffer ~2.5 min yet play exactly on Irish time; SPLICE_LEAD must stay
+  well above PLAYLIST_AHEAD or clients could fetch unspliced bytes.
 - Chunksets are retimed with `atempo` to exact multiples of `SEG` so every
   replaced slot is exactly one full segment; true durations are shared with the
   scheduler via `schedule/.splice-durs.json`.
@@ -149,9 +151,10 @@ STREAM_URL ──curl──> ffmpeg ──> data/archive/YYYYMMDDHHMMSS.ts (+ in
   `tick()` loop). Imports shared helpers.
 - `scheduler/splice.py` — `import scheduler as sch` (path hack
   `sys.path.insert(0, "/")`); reads events/windows from scheduler, does the
-  file overwrites. `LEAD=60`, `EXPOSURE=3*SEG`.
+  file overwrites. `LEAD=sch.SPLICE_LEAD`, `EXPOSURE=3*SEG`.
 - `recorder/record.sh` — ingest loop; lavfi: URLs are a test source.
-- `web/index.html` — hls.js player, `liveSyncDurationCount: 3`.
+- `web/index.html` — public player (hls.js `liveSyncDuration: 150` to match
+  EXT-X-START; native HLS on iOS), prayer card, Media Session, PWA, sleep timer.
 - `nginx/nginx.conf` — caching/CORS rules per location.
 
 ## Monitor (read-only, password-protected)
