@@ -2,3 +2,12 @@ data/
 adhans-raw/
 *.mp3
 monitor.htpasswd
+# media is server-managed (monitor media library); keep only the folders
+adhans/*
+!adhans/.gitkeep
+adhans-fajr/*
+!adhans-fajr/.gitkeep
+fillers/*
+!fillers/.gitkeep
+adhan-prefixes/*
+!adhan-prefixes/.gitkeep

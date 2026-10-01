@@ -61,6 +61,18 @@
   .kind-dot { display:inline-block; width:.6rem; height:.6rem; border-radius:2px;
               margin-right:.35rem; vertical-align:0; }
   td button { padding:.15rem .55rem; font-size:.75rem; }
+  .tabs { display:flex; gap:.3rem; flex-wrap:wrap; margin-bottom:.6rem; }
+  .tabs button.on { background:var(--quran); border-color:var(--quran); color:#fff; }
+  .media-head { display:flex; gap:.8rem; align-items:center; flex-wrap:wrap; margin-bottom:.5rem; }
+  .notice { border-radius:6px; padding:.35rem .6rem; font-size:.8rem; }
+  .notice.warn { background:#3a2f10; color:var(--warn); }
+  .notice.info { background:#10283a; color:#8cc8f0; }
+  .notice.err { background:#3a1414; color:#ff9a9a; }
+  .notice.ok { background:#123524; color:var(--ok); }
+  progress { width:180px; }
+  details summary { cursor:pointer; color:var(--dim); margin-top:.7rem; }
+  button.danger:hover { background:#5a1d1d; }
+  label.upload { display:inline-flex; gap:.4rem; align-items:center; }
 </style>
 </head>
 <body>
@@ -116,6 +128,28 @@
   </div>
 
   <div class="panel">
+    <h2>Media library — adhans, fillers and prayer starters</h2>
+    <div class="tabs" id="media-tabs">
+      <button data-k="adhan" class="on">Adhans</button>
+      <button data-k="fajr">Fajr adhans</button>
+      <button data-k="filler">Fillers</button>
+      <button data-k="starter">Prayer starters</button>
+    </div>
+    <div class="media-head">
+      <span id="media-hint" class="dim"></span>
+      <label class="upload" id="media-upload-wrap"><button type="button" id="media-upload-btn">⬆ Upload audio…</button>
+        <input type="file" id="media-file" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac" multiple hidden></label>
+      <progress id="media-progress" max="1" value="0" hidden></progress>
+    </div>
+    <div id="media-notices"></div>
+    <table id="tbl-media"><thead></thead><tbody></tbody></table>
+    <details id="media-trash"><summary>Trash (<span id="trash-n">0</span>)</summary>
+      <table id="tbl-trash"><thead><tr><th>File</th><th>Deleted (Dublin)</th><th></th></tr></thead><tbody></tbody></table>
+    </details>
+    <audio id="media-audio" hidden></audio>
+  </div>
+
+  <div class="panel">
     <h2>Splice schedule — next hours (wall time vs delayed content time)</h2>
     <table id="tbl-events"><thead><tr>
       <th>Wall (UTC)</th><th>Content slot (UTC)</th><th>Type</th><th>Prayer</th>
@@ -125,5 +159,6 @@
 </main>
 <script src="hls.min.js"></script>
 <script src="monitor.js"></script>
+<script src="media.js"></script>
 </body>
 </html>

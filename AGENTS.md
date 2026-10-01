@@ -64,8 +64,8 @@ STREAM_URL ──curl──> ffmpeg ──> data/archive/YYYYMMDDHHMMSS.ts (+ in
 
 ## Content sources
 
-- `adhans/` — Irish Adhan audio (round-robin on each Irish event). Dropping mp3s
-  in is picked up within seconds, no restart.
+- `adhans/` — Irish Adhan audio (round-robin on each Irish event). Upload via
+  the monitor's Media library (or drop files in); picked up within seconds.
 - `fillers/` — played during Cairo Adhan suppression windows (round-robin per
   window). If empty, the Cairo Adhan stays audible.
 - `adhan-prefixes/<Prayer>.mp3` — short per-prayer "starter" occupying slots
@@ -106,9 +106,12 @@ STREAM_URL ──curl──> ffmpeg ──> data/archive/YYYYMMDDHHMMSS.ts (+ in
 - The stream only exists after the recorder has run for `DELAY_SECONDS`.
 - DST: Egypt and Ireland shift on different dates; for a few weeks each March/
   October the offset is 1 h or 3 h — update `DELAY_SECONDS` then.
-- `adhans-raw/` (raw harvested cuts) is gitignored; `adhans/` and `fillers/`
-  mp3s are committed (`.gitignore` has `*.mp3` but the committed ones are
-  force-added — check `git ls-files` before assuming).
+- Media folders (`adhans/`, `adhans-fajr/`, `fillers/`, `adhan-prefixes/`) are
+  server-managed and gitignored (only `.gitkeep` is tracked). Manage them from
+  the monitor's Media library (upload / trash / restore; deleted files go to
+  `<folder>/.trash/`). The scheduler re-chunks changes in a background thread
+  into a staging dir and swaps it in, so the splicer never sees a half pool.
+  `adhans-raw/` (raw harvested cuts) is gitignored too.
 - `EXT-X-MEDIA-SEQUENCE` must step by exactly 1 per segment (iOS AVPlayer /
   ExoPlayer track position by it). `scheduler.media_sequence` assigns numbers
   when names first enter the playlist, persisted in `live/.media-seq.json`.

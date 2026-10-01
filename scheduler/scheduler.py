@@ -9,7 +9,7 @@ delayed window before they air. This service only marks the spliced
 ranges with EXT-X-DISCONTINUITY so players flush cleanly at the audio
 change; the playlist itself is always one continuous archive sequence.
 """
-import os, re, time, json, glob, shutil, subprocess, urllib.request, datetime
+import os, re, time, json, glob, shutil, threading, subprocess, urllib.request, datetime
 
 SEG = int(os.environ.get("SEGMENT_SECONDS", "10"))
 DELAY = int(os.environ.get("DELAY_SECONDS", "7200"))
@@ -278,8 +278,25 @@ def retimed_chunk(f, sdir):
                            os.path.join(sdir, "playlist.m3u8")],
                           capture_output=True, text=True)
 
+CHUNK_STATUS = os.path.join(STATIC, ".chunk-status.json")
+
+def chunk_status(kind, state):
+    """Record 'preparing'/'ready' per kind for the monitor."""
+    try:
+        st = json.load(open(CHUNK_STATUS))
+    except Exception:
+        st = {}
+    st[kind] = {"state": state, "at": time.time()}
+    tmp = CHUNK_STATUS + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(st, f)
+    os.replace(tmp, CHUNK_STATUS)
+
 def ensure_chunksets():
-    """(Re)chunk adhan/fajr-adhan/filler audio into static HLS segment sets on change."""
+    """(Re)chunk adhan/fajr-adhan/filler audio into static HLS segment sets on change.
+
+    A rebuild is chunked into a hidden staging dir first and swapped in only
+    when complete, so the splicer never sees a half-built or empty pool."""
     os.makedirs(STATIC, exist_ok=True)
     sets = {}
     for kind, folder in (("adhan", ADHANS), ("fajr-adhan", FAJR_ADHANS),
@@ -296,21 +313,33 @@ def ensure_chunksets():
         if sig == old and (not files or glob.glob(os.path.join(STATIC, f"{kind}-*"))):
             sets[kind] = sorted(glob.glob(os.path.join(STATIC, f"{kind}-*"))) if files else []
             continue
-        for d in glob.glob(os.path.join(STATIC, f"{kind}-*")):
-            shutil.rmtree(d, ignore_errors=True)
-        made = []
-        for i, f in enumerate(files):
-            sdir = os.path.join(STATIC, f"{kind}-{i}")
+        chunk_status(kind, "preparing")
+        stage = os.path.join(STATIC, f".stage-{kind}")
+        shutil.rmtree(stage, ignore_errors=True)
+        os.makedirs(stage)
+        staged = []
+        for f in files:
+            sdir = os.path.join(stage, f"{kind}-{len(staged)}")
             os.makedirs(sdir, exist_ok=True)
             r = retimed_chunk(f, sdir)
             if r.returncode != 0:
                 log(f"chunking failed for {f}: {r.stderr.strip()[:200]}")
                 shutil.rmtree(sdir, ignore_errors=True)
                 continue
-            made.append(sdir)
+            staged.append(sdir)
+        # swap: drop the old sets, move the staged ones into place
+        for d in glob.glob(os.path.join(STATIC, f"{kind}-*")):
+            shutil.rmtree(d, ignore_errors=True)
+        made = []
+        for sdir in staged:
+            dst = os.path.join(STATIC, os.path.basename(sdir))
+            os.rename(sdir, dst)
+            made.append(dst)
+        shutil.rmtree(stage, ignore_errors=True)
         with open(tag, "w") as tf:
             tf.write(sig)
         sets[kind] = made
+        chunk_status(kind, "ready")
         log(f"{kind}: {len(made)} file(s) chunked")
     return sets
 
@@ -318,6 +347,7 @@ def ensure_starter_chunksets():
     """Per-prayer starters (adhan-prefixes), each retimed to whole slots."""
     os.makedirs(STATIC, exist_ok=True)
     out = {}
+    did = False
     for f in sorted(glob.glob(os.path.join(STARTERS, "*"))):
         if os.path.splitext(f)[1].lower() not in AUDIO_EXT:
             continue
@@ -334,18 +364,46 @@ def ensure_starter_chunksets():
         if sig == old and glob.glob(os.path.join(sdir, "seg_*.ts")):
             out[prayer] = sdir
             continue
-        shutil.rmtree(sdir, ignore_errors=True)
-        os.makedirs(sdir, exist_ok=True)
-        r = retimed_chunk(f, sdir)
+        chunk_status("starter", "preparing")
+        did = True
+        stage = os.path.join(STATIC, f".stage-starter-{prayer}")
+        shutil.rmtree(stage, ignore_errors=True)
+        os.makedirs(stage)
+        r = retimed_chunk(f, stage)
         if r.returncode != 0:
             log(f"chunking failed for starter {f}: {r.stderr.strip()[:200]}")
-            shutil.rmtree(sdir, ignore_errors=True)
+            shutil.rmtree(stage, ignore_errors=True)
             continue
+        shutil.rmtree(sdir, ignore_errors=True)
+        os.rename(stage, sdir)
         with open(tag, "w") as tf:
             tf.write(sig)
         out[prayer] = sdir
         log(f"starter: {prayer} chunked")
+    # a starter whose file was removed must stop airing
+    for d in glob.glob(os.path.join(STATIC, "starter-*")):
+        prayer = os.path.basename(d)[len("starter-"):]
+        if prayer not in out:
+            shutil.rmtree(d, ignore_errors=True)
+            try:
+                os.remove(os.path.join(STATIC, f".starter-{prayer}-v2.sig"))
+            except OSError:
+                pass
+            log(f"starter: {prayer} removed")
+    if did:
+        chunk_status("starter", "ready")
     return out
+
+def chunk_loop():
+    """Background chunker: re-chunking takes ~a minute for a full pool and
+    must never block the playlist loop (players would stall)."""
+    while True:
+        try:
+            ensure_chunksets()
+            ensure_starter_chunksets()
+        except Exception as e:
+            log(f"chunking error: {e}")
+        time.sleep(5)
 
 def load_chunkset(sdir):
     entries, dur = [], None
@@ -514,8 +572,6 @@ def splice_durs():
 def tick():
     now = time.time()
     purge_old_state(now)
-    ensure_chunksets()          # adhan/filler chunksets: splicer source material
-    ensure_starter_chunksets()  # per-prayer starters
 
     # Single path: the delayed window is always archive segments; the
     # splicer rewrites the segment *files* inside the window, so adhan /
@@ -539,6 +595,7 @@ def tick():
 
 def main():
     log(f"starting: delay={DELAY}s seg={SEG}s")
+    threading.Thread(target=chunk_loop, daemon=True).start()
     try:
         import monitor
         monitor.start()
