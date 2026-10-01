@@ -80,18 +80,12 @@ state = load_json(STATE_FILE, {})
 
 
 def archive_slots():
-    """[(content_ts_int, filename)] sorted, from the recorder index."""
-    out = []
-    try:
-        lines = open(os.path.join(ARCHIVE, "index.m3u8")).read().splitlines()
-    except Exception:
-        return out
-    for line in lines:
-        m = re.fullmatch(r"(\d{14})\.ts", os.path.basename(line.strip()))
-        if m:
-            dt = datetime.datetime.strptime(m.group(1), "%Y%m%d%H%M%S").replace(tzinfo=UTC)
-            out.append((int(dt.timestamp()), m.group(0)))
-    return sorted(out)
+    """[(content_ts_int, filename)] sorted, from the archive directory.
+
+    Not from the recorder's index.m3u8: the index restarts empty whenever
+    the recorder restarts, which hid the whole delayed window from the
+    splicer for DELAY seconds afterwards (events silently skipped)."""
+    return dir_slots()
 
 
 def chunk_segments(sdir):
