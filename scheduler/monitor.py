@@ -186,6 +186,98 @@ def chunk_count(kind, idx):
     return len(entries)
 
 
+# ---------------- planned (not yet applied) splices ----------------
+# The splicer overwrites archive slots only ~60 s before they air, so until
+# then the files still hold the original Cairo audio. To let the monitor
+# preview what WILL air, this mirrors splice.tick()'s plan (same slots,
+# same round-robin order, same MIN_GAP skip rule) without touching files.
+
+def _chunks(sdir):
+    entries, _ = sch.load_chunkset(sdir)
+    return [(d, os.path.join(sdir, u)) for d, u in entries]
+
+
+def _gap(a0, a1, b0, b1):
+    if a1 < b0:
+        return b0 - a1
+    if b1 < a0:
+        return a0 - b1
+    return 0
+
+
+def _static_uri(path):
+    return "/live-static/" + os.path.relpath(path, sch.STATIC)
+
+
+def planned_splices(now, names):
+    """{slot_name: (dur, uri)} for splices the splicer has not applied yet."""
+    st = load_splicer_state()
+    done = st.get("spliced", {}) if isinstance(st.get("spliced"), dict) else {}
+    seg, delay, min_gap = sch.SEG, sch.DELAY, sch.MIN_GAP
+    sets = {k: sorted(glob.glob(os.path.join(sch.STATIC, f"{k}-*")))
+            for k in ("adhan", "fajr-adhan", "filler")}
+    starters = {os.path.basename(d)[len("starter-"):]: d
+                for d in glob.glob(os.path.join(sch.STATIC, "starter-*"))}
+    idx = {"adhan": st.get("adhan_idx", 0), "fajr-adhan": st.get("fajr_adhan_idx", 0),
+           "filler": st.get("filler_idx", 0)}
+    events = sch.irish_prayer_events(now)
+    wins = sch.cairo_windows(now)
+
+    def pool(prayer):
+        return "fajr-adhan" if prayer == "fajr" and sets["fajr-adhan"] else "adhan"
+
+    def span(prayer):
+        k = pool(prayer)
+        if not sets[k]:
+            return 0
+        sp = len(_chunks(starters[prayer])) * seg if prayer in starters else 0
+        return sp + len(_chunks(sets[k][idx[k] % len(sets[k])])) * seg
+
+    plan = {}
+    jobs = [(s, "irish", p) for s, p in events] + [(w["start"], "cairo", w) for w in wins]
+    for start, kind, x in sorted(jobs, key=lambda j: j[0]):
+        if kind == "irish":
+            key = f"irish-{int(start)}"
+            k = pool(x)
+            if key in done or not sets[k]:
+                continue
+            achunks = _chunks(sets[k][idx[k] % len(sets[k])])
+            schunks = _chunks(starters[x]) if x in starters else []
+            spre, total = len(schunks) * seg, len(achunks) * seg
+            if start + total < now:
+                continue
+            if any(_gap(start - spre, start + total, w["start"], w["end"]) <= min_gap
+                   for w in wins):
+                continue                      # splicer skips it: Cairo stays
+            c = start - delay
+            below = [t for t, _ in names if t <= c]
+            if not below or c - below[-1] >= seg:
+                continue
+            anchor = below[-1]
+            pre = [n for t, n in names if anchor - spre <= t < anchor]
+            body = [n for t, n in names if anchor <= t < anchor + total]
+            for n, (d, src) in list(zip(pre, schunks)) + list(zip(body, achunks)):
+                plan[n] = (d, _static_uri(src))
+            idx[k] += 1
+        else:
+            w = x
+            key = f"cairo-{int(w['start'])}"
+            if key in done or not sets["filler"] or w["end"] < now:
+                continue
+            if any(_gap(s, s + span(p), w["start"], w["end"]) <= min_gap for s, p in events):
+                continue
+            chain = []
+            fs = sets["filler"]
+            for j in range(len(fs)):
+                chain.extend(_chunks(fs[(idx["filler"] + j) % len(fs)]))
+            slots = [n for t, n in names
+                     if w["start"] - delay - seg < t < w["end"] - delay]
+            for n, (d, src) in zip(slots, chain):
+                plan[n] = (d, _static_uri(src))
+            idx["filler"] += 1
+    return plan
+
+
 # ---------------- endpoints ----------------
 
 def api_overview(now):
@@ -348,12 +440,22 @@ def api_listen(now, start, minutes):
         picked = [names[first_i]]
     idurs, _ = index_durs_names()
     sdurs = splice_durs()
+    plan = planned_splices(now, names)
     lines = ["#EXTM3U", "#EXT-X-VERSION:3", f"#EXT-X-TARGETDURATION:{sch.SEG}",
              "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:VOD"]
+    prev_planned = False
     for t, n in picked:
-        d = sdurs.get(n) or idurs.get(n) or f"{sch.SEG}.000000"
+        planned = n in plan
+        if planned != prev_planned and len(lines) > 5:
+            lines.append("#EXT-X-DISCONTINUITY")   # preview chunks carry own PTS
+        prev_planned = planned
+        if planned:
+            d, uri = plan[n]
+        else:
+            d = sdurs.get(n) or idurs.get(n) or f"{sch.SEG}.000000"
+            uri = f"/archive/{n}"
         lines.append(f"#EXTINF:{d},")
-        lines.append(f"/archive/{n}")
+        lines.append(uri)
     lines.append("#EXT-X-ENDLIST")
     return "\n".join(lines) + "\n"
 

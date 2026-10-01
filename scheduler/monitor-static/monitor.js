@@ -102,7 +102,7 @@ function renderComing() {
   if (!runs.length) { tb.innerHTML = '<tr><td colspan="6">nothing saved ahead yet</td></tr>'; return; }
   for (const r of runs) {
     const air = r.t0 + TL.delay;
-    const what = KIND_LABEL[r.kind] + (r.pending ? ` — ${r.label}, <span class="pill pending">will be spliced ~1 min before air</span>` : "");
+    const what = KIND_LABEL[r.kind] + (r.pending ? ` — ${r.label}, <span class="pill pending">preview — written into the stream ~1 min before air</span>` : "");
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${fmtDub(Math.max(air, TL.now_utc))}</td>
@@ -110,7 +110,7 @@ function renderComing() {
       <td class="dim">${fmtE(r.t0).slice(11)}</td>
       <td><span class="kind-dot" style="background:${KIND_COLOR[r.kind]}"></span>${what}</td>
       <td>${fmtDur(r.t1 - r.t0)}</td>
-      <td><button data-t="${Math.max(r.t0, TL.airing_ts)}">▶ listen</button></td>`;
+      <td><button data-t="${Math.max(r.pending ? r.t0 - 20 : r.t0, TL.airing_ts)}">▶ listen</button></td>`;
     tb.appendChild(tr);
   }
   tb.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
