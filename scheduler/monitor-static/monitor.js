@@ -10,6 +10,7 @@ const KIND_LABEL = { quran: "Quran", "dublin-adhan": "Dublin adhan",
 
 let TL = null;            // last timeline payload
 let seekTs = null;        // where the player is pointed (content ts)
+let playBase = null;      // content ts of the first segment in the listen playlist
 let playing = false;
 let hls = null;
 
@@ -188,6 +189,19 @@ function drawTimeline() {
   ctx.fillStyle = "#fff";
   ctx.textAlign = ax > W - 60 ? "right" : "left";
   ctx.fillText("airing", ax + (ax > W - 60 ? -3 : 3), 9);
+  // playhead: where the audio actually is
+  const ph = playheadTs();
+  if (ph != null && ph >= t0 && ph <= t1) {
+    const px = x(ph);
+    ctx.strokeStyle = "#ffd23f";        // thin vertical cursor
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(Math.round(px) + 0.5, 0); ctx.lineTo(Math.round(px) + 0.5, H); ctx.stroke();
+    ctx.fillStyle = "#ffd23f";
+    const lab = fmtE(ph).slice(11, 19);
+    ctx.font = "10px sans-serif";
+    ctx.textAlign = px > W - 80 ? "right" : "left";
+    ctx.fillText(lab, px + (px > W - 80 ? -8 : 8), H - 14);
+  }
   TL._geom = { t0, t1, W };
 }
 
@@ -238,8 +252,25 @@ function attach(src) {
   return a;
 }
 
+function playheadTs() {
+  const a = $("audio");
+  if (!a || playBase == null) return null;
+  return playBase + (a.currentTime || 0);
+}
+
+function kindAt(ts) {
+  if (!TL) return "Quran";
+  const m = TL.marks.find(m => m.status === "pending" && ts >= m.t0 && ts < m.t1);
+  if (m) return `${KIND_LABEL[m.kind]} (preview)`;
+  const seg = TL.segments.find(s => ts >= s[0] && ts < s[0] + TL.seg);
+  return seg ? KIND_LABEL[seg[1]] : "no segment";
+}
+
 function seekTo(ts, live) {
   seekTs = ts;
+  // the listen playlist starts at the first segment named at/after ts
+  const first = TL ? TL.segments.find(s => s[0] >= ts) : null;
+  playBase = first ? first[0] : ts;
   $("btn-live").classList.toggle("on", !!live);
   const a = attach(`/monitor/api/listen.m3u8?start=${Math.round(ts)}&minutes=30`);
   if (playing) a.play().catch(() => {});
@@ -247,15 +278,14 @@ function seekTo(ts, live) {
 }
 
 function updatePos() {
-  if (seekTs == null) return;
-  const liveEdge = TL ? TL.airing_ts : seekTs;
-  const behind = Math.round(liveEdge - seekTs);
+  const ph = playheadTs() ?? seekTs;
+  if (ph == null || !TL) return;
+  const behind = Math.round(TL.now_utc_live() - TL.delay - ph);
   $("pos").textContent =
-    `listening to content ${fmtE(seekTs)} UTC (${KIND_LABEL[(TL?.segments.find(
-      s => seekTs >= s[0] && seekTs < s[0] + TL.seg) || [0, "quran"])[1]]})` +
-    (behind > 15 ? ` — ${fmtDur(behind)} behind broadcast`
-     : behind < -15 ? ` — ${fmtDur(-behind)} ahead (airs ${fmtDub(seekTs + TL.delay)} Dublin)`
-     : " — at broadcast point");
+    `${playing ? "playing" : "paused at"} ${kindAt(ph)} — content ${fmtE(ph).slice(11, 19)} UTC` +
+    (behind > 15 ? ` — aired ${fmtDub(ph + TL.delay)} Dublin (${fmtDur(behind)} ago)`
+     : behind < -15 ? ` — airs ${fmtDub(ph + TL.delay)} Dublin (in ${fmtDur(-behind)})`
+     : " — in sync with the broadcast");
 }
 
 $("btn-play").addEventListener("click", () => {
@@ -292,6 +322,8 @@ async function refreshOverview() {
 async function refreshTimeline() {
   try {
     TL = await api("/monitor/api/timeline?hours=4.5");
+    const fetchedAt = Date.now() / 1000, serverNow = TL.now_utc;
+    TL.now_utc_live = () => serverNow + (Date.now() / 1000 - fetchedAt);
     $("ck-air").textContent = fmtE(TL.airing_ts).slice(11, 19);
     drawTimeline();
     renderComing();
@@ -305,3 +337,4 @@ window.addEventListener("resize", drawTimeline);
 refreshOverview(); refreshTimeline();
 setInterval(refreshOverview, 10000);
 setInterval(refreshTimeline, 30000);
+setInterval(() => { drawTimeline(); updatePos(); }, 500);   // move the playhead
