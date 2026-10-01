@@ -104,6 +104,8 @@
   </div>
   <div id="sleep-left"></div>
 
+  <button class="btn" id="install" hidden style="margin-top:.6rem">⬇ Install Quran Radio app</button>
+
   <footer>
     <div id="install-hint"></div>
     <details>
@@ -325,10 +327,31 @@ $('copy-url').addEventListener('click', async () => {
 /* ---------------- add to home screen hint ---------------- */
 
 const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+let installEvt = null;
+window.addEventListener('beforeinstallprompt', e => {   // Android / desktop Chrome, Edge, Samsung
+  e.preventDefault();
+  installEvt = e;
+  $('install').hidden = false;
+  $('install-hint').textContent = '';
+});
+$('install').addEventListener('click', async () => {
+  if (!installEvt) return;
+  installEvt.prompt();
+  const choice = await installEvt.userChoice.catch(() => ({}));
+  track('install_prompt', { outcome: choice.outcome || 'unknown' });
+  installEvt = null;
+  $('install').hidden = true;
+});
 if (!standalone && /iPhone|iPad/.test(navigator.userAgent)) {
   $('install-hint').textContent = 'Tip: tap Share ↑ then “Add to Home Screen” to open Quran Radio like an app.';
+} else if (!standalone && /Android/.test(navigator.userAgent)) {
+  // shown only if the browser never offers its own install prompt
+  setTimeout(() => {
+    if (!installEvt) $('install-hint').textContent = 'Tip: open the browser menu ⋮ and choose “Install app” or “Add to Home screen”.';
+  }, 4000);
 }
-window.addEventListener('appinstalled', () => track('app_installed'));
+window.addEventListener('appinstalled', () => { $('install').hidden = true; track('app_installed'); });
 if (standalone) track('opened_from_home_screen');
 </script>
 </body>
