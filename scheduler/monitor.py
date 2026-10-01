@@ -157,6 +157,8 @@ def event_rows(now, delay):
         status = "pending"
         if key in done:
             status = "spliced" if done[key] else "skipped"
+        elif start + 60 < now:
+            status = "missed"           # aired without the splicer acting on it
         rows.append({"kind": "dublin-adhan", "prayer": prayer, "wall": start,
                      "content": start - delay, "status": status})
     for w in sch.cairo_windows(now):
@@ -166,6 +168,8 @@ def event_rows(now, delay):
         status = "pending"
         if key in done:
             status = "spliced" if done[key] else "skipped"
+        elif w["start"] + 60 < now:
+            status = "missed"
         rows.append({"kind": "cairo-suppression", "prayer": w["name"],
                      "wall": w["start"], "wall_end": w["end"],
                      "content": w["start"] - delay,
