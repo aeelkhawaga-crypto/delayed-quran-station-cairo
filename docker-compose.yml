@@ -31,6 +31,7 @@ services:
       - ./fillers:/fillers:rw
       - ./adhan-prefixes:/starters:rw
       - ./schedule:/schedule
+      - /var/log/nginx:/hostlogs:ro      # monitor: listener counts from the host access log
     logging:
       driver: json-file
       options:

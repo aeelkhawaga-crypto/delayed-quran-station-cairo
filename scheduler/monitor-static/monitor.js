@@ -57,6 +57,7 @@ function renderCards(o) {
     <div class="card"><div class="k">Watchdog</div>
       <div class="v ${wdCls}">${wdTxt}</div>
       <div class="s">${wd && wd.restarted ? "restarted recorder on last check" : "checks every minute"}</div></div>
+    ${listenersCard(o)}
     ${feederCard(o)}
     <div class="card"><div class="k">Splicer</div>
       <div class="v ${o.splicer_tick_age_s == null ? "bad" : o.splicer_tick_age_s < 30 ? "ok" : "bad"}">${o.splicer_tick_age_s == null ? "no state" : Math.round(o.splicer_tick_age_s) + "s ago"}</div>
@@ -70,6 +71,17 @@ function renderCards(o) {
     <div class="card"><div class="k">Fajr pool</div>
       <div class="v">${o.pools.fajr.chunksets} fajr-only</div>
       <div class="s">next: ${o.pools.fajr.next ?? "—"}</div></div>`;
+}
+
+function listenersCard(o) {
+  const L = o.listeners;
+  if (!L) return `<div class="card"><div class="k">Listeners</div>
+    <div class="v warn">no data</div><div class="s">access log not mounted</div></div>`;
+  const by = Object.entries(L.now_by).map(([k, n]) => `${k} ${n}`).join(" · ") || "nobody right now";
+  return `<div class="card"><div class="k">Listening now</div>
+    <div class="v ${L.now ? "ok" : ""}">${L.now}</div>
+    <div class="s">${by}<br>today: ${L.today_devices} devices · ${L.today_hours} h ·
+      peak ${L.peak}${L.peak_at ? " at " + fmtDubHM(L.peak_at) : ""}</div></div>`;
 }
 
 function feederCard(o) {

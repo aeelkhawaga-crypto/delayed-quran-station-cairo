@@ -7,6 +7,7 @@ auth_basic (same style as the family-hub app). Everything is derived from
 state that already exists: the archive directory, the recorder index, the
 splicer state files, and the scheduler's own timetable functions.
 """
+import collections
 import glob
 import json
 import os
@@ -503,6 +504,106 @@ def media_file_path(kind, name, trash):
     return os.path.join(folder, name)
 
 
+# ---------------- listeners (from the host nginx access log) ----------------
+# Players re-fetch /live/delayed.m3u8 every ~10 s while playing, so a device
+# (IP + user agent) that fetched it in the last LISTEN_WINDOW seconds is
+# listening now. The host log (mounted read-only) has real client IPs; it is
+# read incrementally and follows daily rotation.
+
+HOST_LOG = os.environ.get("HOST_ACCESS_LOG", "/hostlogs/access.log")
+LISTEN_WINDOW = 60
+_LOG_RE = re.compile(r'^(\S+) \S+ \S+ \[(\d+)/(\w+)/(\d+):(\d+):(\d+):(\d+) [^\]]+\] '
+                     r'"GET /live/delayed\.m3u8[^"]*" 200 \S+ "[^"]*" "([^"]*)"')
+_MON = {m: i for i, m in enumerate("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(), 1)}
+
+
+def _device(ua):
+    if "iPhone" in ua or "iPad" in ua:
+        return "iPhone"
+    if "Android" in ua or "ExoPlayer" in ua:
+        return "Android"
+    if "Windows" in ua or "Macintosh" in ua or "Linux" in ua or "CrOS" in ua:
+        return "Desktop"
+    return "Other app"
+
+
+def _internal(ip):
+    if ip in ("127.0.0.1", "::1"):
+        return True
+    parts = ip.split(".")
+    return len(parts) == 4 and parts[0] == "172" and 16 <= int(parts[1]) <= 31   # docker
+
+
+class ListenerLog:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.ino, self.off, self.day = None, 0, None
+        self.last = {}            # (ip, ua) -> last playlist fetch epoch
+        self.minutes = {}         # minute epoch -> set of (ip, ua), today only
+        self.carry = b""
+
+    def _reset(self, day):
+        self.day, self.minutes = day, {}
+
+    def update(self, now):
+        try:
+            st = os.stat(HOST_LOG)
+        except OSError:
+            return False
+        if st.st_ino != self.ino or st.st_size < self.off:     # rotated
+            self.ino, self.off, self.carry = st.st_ino, 0, b""
+        if st.st_size == self.off:
+            return True
+        with open(HOST_LOG, "rb") as f:
+            f.seek(self.off)
+            data = self.carry + f.read(st.st_size - self.off)
+            self.off = st.st_size
+        lines = data.split(b"\n")
+        self.carry = lines.pop()                 # partial last line
+        for raw in lines:
+            if b"delayed.m3u8" not in raw:
+                continue
+            m = _LOG_RE.match(raw.decode("utf-8", "replace"))
+            if not m:
+                continue
+            ip, d, mon, y, hh, mm, ss, ua = m.groups()
+            if _internal(ip):
+                continue
+            t = datetime.datetime(int(y), _MON[mon], int(d), int(hh), int(mm), int(ss),
+                                  tzinfo=UTC).timestamp()
+            off = sch.dublin_offset(datetime.datetime.fromtimestamp(t, UTC))
+            day = datetime.datetime.fromtimestamp(t + off, UTC).date()
+            if day != self.day:
+                self._reset(day)
+            key = (ip, ua)
+            self.last[key] = max(t, self.last.get(key, 0))
+            self.minutes.setdefault(int(t // 60) * 60, set()).add(key)
+        cut = now - 3600
+        self.last = {k: v for k, v in self.last.items() if v >= cut}
+        return True
+
+    def summary(self, now):
+        with self.lock:
+            ok = self.update(now)
+            if not ok:
+                return None
+            live = [k for k, v in self.last.items() if now - v <= LISTEN_WINDOW]
+            by = collections.Counter(_device(ua) for _, ua in live)
+            devices = set().union(*self.minutes.values()) if self.minutes else set()
+            listener_minutes = sum(len(v) for v in self.minutes.values())
+            peak, peak_at = 0, None
+            for mt, keys in self.minutes.items():
+                if len(keys) > peak:
+                    peak, peak_at = len(keys), mt
+            return {"now": len(live), "now_by": dict(by),
+                    "today_devices": len(devices),
+                    "today_hours": round(listener_minutes / 60, 1),
+                    "peak": peak, "peak_at": peak_at}
+
+
+_listeners = ListenerLog()
+
+
 # ---------------- public prayer times (player page, no auth) ----------------
 
 _public_cache = {"t": 0.0, "data": None}
@@ -583,6 +684,7 @@ def api_overview(now):
         "playlist": {"media_seq": pl_seq, "segments": pl_n, "file_age_s": pl_age},
         "feeder": read_json(os.path.join(ARCHIVE, ".feeder.json")),
         "splicer_tick_age_s": file_age(os.path.join(sch.SCHED, ".splice-runs.json"), now),
+        "listeners": _listeners.summary(now),
         "disk": disk,
         "healed_segments": healed,
         "splice_last_end": last_splice,
