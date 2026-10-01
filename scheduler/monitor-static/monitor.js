@@ -94,7 +94,7 @@ function renderComing() {
   // group consecutive segments from the airing point onwards into runs by kind
   const runs = [];
   for (const [t, k] of TL.segments) {
-    if (t + TL.seg <= TL.airing_ts) continue;
+    if (t + TL.seg <= airingNow()) continue;
     const last = runs[runs.length - 1];
     if (last && last.kind === k && t - last.t1 < 2 * TL.seg) last.t1 = t + TL.seg;
     else runs.push({ kind: k, t0: t, t1: t + TL.seg });
@@ -117,7 +117,7 @@ function renderComing() {
       <td class="dim">${fmtDub(r.t1 + TL.delay)}</td>
       <td><span class="kind-dot" style="background:${KIND_COLOR[r.kind]}"></span>${what}</td>
       <td>${fmtDur(r.t1 - r.t0)}</td>
-      <td><button data-t="${Math.max(r.pending ? r.t0 - 20 : r.t0, TL.airing_ts)}">▶ listen</button></td>`;
+      <td><button data-t="${Math.max(r.pending ? r.t0 - 20 : r.t0, airingNow())}">▶ listen</button></td>`;
     tb.appendChild(tr);
   }
   tb.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
@@ -186,15 +186,16 @@ function drawTimeline() {
     ctx.strokeRect(x(m.t0), 10, Math.max(2, x(m.t1) - x(m.t0)), H - 20);
     ctx.setLineDash([]);
   }
-  // airing line
-  const ax = x(TL.airing_ts);
+  // airing line: follows the live clock (TL is only refetched every 30 s)
+  const airNow = airingNow();
+  const ax = x(airNow);
   ctx.strokeStyle = "#ffffff";
   ctx.setLineDash([5, 4]);
   ctx.beginPath(); ctx.moveTo(ax, 4); ctx.lineTo(ax, H - 4); ctx.stroke();
   ctx.setLineDash([]);
   ctx.fillStyle = "#fff";
   ctx.textAlign = ax > W - 60 ? "right" : "left";
-  ctx.fillText("airing", ax + (ax > W - 60 ? -3 : 3), 9);
+  ctx.fillText("on air " + fmtDub(airNow + TL.delay), ax + (ax > W - 60 ? -3 : 3), 9);
   // selection
   const S = drag && drag.moved ? { a: Math.min(drag.t0, drag.t1), b: Math.max(drag.t0, drag.t1) } : sel;
   if (S) {
@@ -317,6 +318,12 @@ function attach(src) {
   return a;
 }
 
+// broadcast point now (content time), from the live clock; TL is only
+// refetched every 30 s, so TL.airing_ts alone would lag and jump
+function airingNow() {
+  return TL.now_utc_live ? TL.now_utc_live() - TL.delay : TL.airing_ts;
+}
+
 function playheadTs() {
   const a = $("audio");
   if (!a || playBase == null) return null;
@@ -358,16 +365,16 @@ $("btn-play").addEventListener("click", () => {
   const a = $("audio");
   playing = !playing;
   $("btn-play").textContent = playing ? "⏸ Pause" : "▶ Play";
-  if (playing) { if (!a) seekTo(TL ? TL.airing_ts : Date.now() / 1000 - 7200, true);
+  if (playing) { if (!a) seekTo(TL ? airingNow() : Date.now() / 1000 - 7200, true);
                  else a.play().catch(() => {}); }
   else if (a) a.pause();
 });
 $("btn-live").addEventListener("click", () => {
-  if (TL) seekTo(TL.airing_ts, true);
+  if (TL) seekTo(airingNow(), true);
 });
-$("btn-back").addEventListener("click", () => seekTo((seekTs ?? TL.airing_ts) - 60, false));
+$("btn-back").addEventListener("click", () => seekTo((seekTs ?? airingNow()) - 60, false));
 $("btn-fwd").addEventListener("click", () => {
-  const a = TL ? TL.airing_ts : seekTs;
+  const a = TL ? airingNow() : seekTs;
   const newest = TL ? TL.newest_ts - 60 : a;
   seekTo(Math.min((seekTs ?? a) + 60, newest), false);
 });
@@ -390,12 +397,12 @@ async function refreshTimeline() {
     TL = await api("/monitor/api/timeline?hours=4.5");
     const fetchedAt = Date.now() / 1000, serverNow = TL.now_utc;
     TL.now_utc_live = () => serverNow + (Date.now() / 1000 - fetchedAt);
-    $("ck-air").textContent = new Date(TL.airing_ts * 1000).toLocaleTimeString("en-GB",
+    $("ck-air").textContent = new Date(airingNow() * 1000).toLocaleTimeString("en-GB",
       { timeZone: "Africa/Cairo", hour: "2-digit", minute: "2-digit" });
     drawTimeline();
     renderComing();
     $("tl-ahead").textContent = (TL.delay / 3600).toFixed(1).replace(/\.0$/, "");
-    if ($("btn-live").classList.contains("on")) { seekTs = TL.airing_ts; }
+    if ($("btn-live").classList.contains("on")) { seekTs = airingNow(); }
     updatePos();
   } catch (e) { console.warn("timeline:", e.message); }
 }
