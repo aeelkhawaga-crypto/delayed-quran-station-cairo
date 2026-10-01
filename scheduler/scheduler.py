@@ -251,10 +251,33 @@ def probe_duration(path):
     except Exception:
         return None
 
-def retimed_chunk(f, sdir):
+# Loudness targets (EBU R128 integrated, LUFS) for inserted audio. The Cairo
+# stream averages about -18.4 LUFS; source files ranged from -22 to -8 LUFS,
+# which made the volume jump at every adhan / Cairo cover. Adhans sit ~2 dB
+# above the stream so they stand out without startling.
+LOUDNESS = {"adhan": -16.5, "fajr-adhan": -16.5, "filler": -18.5, "starter": -18.5}
+
+def loudness_filter(f, target):
+    """Two-pass loudnorm: measure the file, then a single linear gain to
+    `target` (no compression; loudnorm falls back to gentle dynamic mode only
+    if the gain would push peaks over -1.5 dBTP). None if measuring fails."""
+    try:
+        r = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-i", f, "-af",
+                            f"loudnorm=I={target}:TP=-1.5:LRA=11:print_format=json",
+                            "-f", "null", "-"], capture_output=True, text=True, timeout=300)
+        m = json.loads(r.stderr[r.stderr.rindex("{"):r.stderr.rindex("}") + 1])
+        return (f"loudnorm=I={target}:TP=-1.5:LRA=11:measured_I={m['input_i']}"
+                f":measured_TP={m['input_tp']}:measured_LRA={m['input_lra']}"
+                f":measured_thresh={m['input_thresh']}:offset={m['target_offset']}:linear=true")
+    except Exception as e:
+        log(f"loudness measure failed for {f}: {e} — chunking without levelling")
+        return None
+
+def retimed_chunk(f, sdir, loudness=None):
     """Chunk an audio file into whole 10s slots: retime with atempo
     (imperceptible) to an exact multiple of SEG, then pad/trim to exact,
-    so every segment is a full slot and slots never carry short tails."""
+    so every segment is a full slot and slots never carry short tails.
+    With `loudness` (LUFS), the file is first levelled to that loudness."""
     dur = probe_duration(f)
     n = 1
     if dur:
@@ -263,6 +286,10 @@ def retimed_chunk(f, sdir):
     target = n * SEG
     tempo = dur / target if dur else 1.0
     filters = []
+    if loudness is not None:
+        lf = loudness_filter(f, loudness)
+        if lf:
+            filters.append(lf)
     if 0.5 <= tempo <= 2.0:
         filters.append(f"atempo={tempo:.5f}")
     # trim a hair short: the AAC priming frame (~23ms) would otherwise spill
@@ -305,7 +332,7 @@ def ensure_chunksets():
             files, sig = folder_sig(folder)
         except Exception:
             files, sig = [], ""
-        tag = os.path.join(STATIC, f".{kind}-v3.sig")
+        tag = os.path.join(STATIC, f".{kind}-v4.sig")
         try:
             old = open(tag).read()
         except Exception:
@@ -321,7 +348,7 @@ def ensure_chunksets():
         for f in files:
             sdir = os.path.join(stage, f"{kind}-{len(staged)}")
             os.makedirs(sdir, exist_ok=True)
-            r = retimed_chunk(f, sdir)
+            r = retimed_chunk(f, sdir, LOUDNESS.get(kind))
             if r.returncode != 0:
                 log(f"chunking failed for {f}: {r.stderr.strip()[:200]}")
                 shutil.rmtree(sdir, ignore_errors=True)
@@ -355,7 +382,7 @@ def ensure_starter_chunksets():
         if prayer not in {p.lower() for p in PRAYERS}:
             continue
         sdir = os.path.join(STATIC, f"starter-{prayer}")
-        tag = os.path.join(STATIC, f".starter-{prayer}-v2.sig")
+        tag = os.path.join(STATIC, f".starter-{prayer}-v3.sig")
         sig = f"{os.path.basename(f)}:{os.path.getmtime(f)}"
         try:
             old = open(tag).read()
@@ -369,7 +396,7 @@ def ensure_starter_chunksets():
         stage = os.path.join(STATIC, f".stage-starter-{prayer}")
         shutil.rmtree(stage, ignore_errors=True)
         os.makedirs(stage)
-        r = retimed_chunk(f, stage)
+        r = retimed_chunk(f, stage, LOUDNESS["starter"])
         if r.returncode != 0:
             log(f"chunking failed for starter {f}: {r.stderr.strip()[:200]}")
             shutil.rmtree(stage, ignore_errors=True)
@@ -386,7 +413,7 @@ def ensure_starter_chunksets():
         if prayer not in out:
             shutil.rmtree(d, ignore_errors=True)
             try:
-                os.remove(os.path.join(STATIC, f".starter-{prayer}-v2.sig"))
+                os.remove(os.path.join(STATIC, f".starter-{prayer}-v3.sig"))
             except OSError:
                 pass
             log(f"starter: {prayer} removed")
